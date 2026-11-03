@@ -1,5 +1,7 @@
 # Fleet Runner lessons
 
+- Diagnose a missing log tail by comparing the controller log, retained worker log and producer's own saved report. Equal worker/controller bytes locate loss before collection. On POSIX, Node writes to pipes/FIFOs asynchronously: writableNeedDrain=false does not prove queued writes completed before process.exit. An Nx 23.3.1 probe lost the tail of an 11,008-byte FIFO write at exactly 8,192 bytes; awaiting the write callback preserved it. Fix producer completion rather than adding timed padding or assuming receipt success proves a complete console report.
+
 - Saved runs and one-time submits must share the controller's default-first worker order, resolving a valid default alias to its canonical entry. An explicit worker list and a project's worker pin remain binding. Prefer a worker before admission; never replay a failed or uncertain admitted job on another machine.
 
 - Native-notification tests must inject an explicit recorder or no-op sender. A PATH substitute is not safe isolation: a local Node launcher can prepend real tool directories and bypass the fake sender. The installed-wiring probe produced a real fixture banner; direct sender injection removed that path.
