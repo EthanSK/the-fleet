@@ -30,7 +30,7 @@ log() { printf '\033[1m==>\033[0m %s\n' "$1"; }
 fail() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 
 [[ "$(uname -s)" == "Darwin" ]] || fail "The desktop app builds on macOS only."
-for tool in swift iconutil codesign plutil ditto; do
+for tool in swift iconutil codesign plutil ditto python3; do
   command -v "${tool}" >/dev/null 2>&1 || fail "${tool} is required (install Xcode or its command line tools)."
 done
 [[ "${CONFIGURATION}" == "release" || "${CONFIGURATION}" == "debug" ]] || fail "CONFIGURATION must be release or debug."
@@ -76,6 +76,16 @@ codesign --verify --strict "${APP_DIR}"
 ARCHIVE_PATH="${APP_DIR}.zip"
 rm -f "${ARCHIVE_PATH}"
 ditto -c -k --keepParent "${APP_DIR}" "${ARCHIVE_PATH}"
+# Keep the scope and complete license beside the app in the distributable.
+# This leaves the signed bundle itself unchanged.
+python3 - "${ARCHIVE_PATH}" "${REPO_ROOT}" <<'PY'
+from pathlib import Path
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_DEFLATED) as archive:
+    for name in ('LICENSE', 'LICENSING.md'):
+        archive.write(Path(sys.argv[2]) / name, name)
+PY
 
 log "Done: ${APP_DIR} (${VERSION})"
 log "Archive: ${ARCHIVE_PATH}"
