@@ -1,0 +1,49 @@
+// Extraction of existing streamSnapshotFile checks from tar.ts. Tar upload
+// and new independent rsync staging share the same bounded, hash-checked file
+// reader. Neither path reads beyond the planned size or follows a final link.
+import { createHash } from 'node:crypto';
+import { constants, promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
+import { FleetError } from '../errors.ts';
+import type { SnapshotEntry } from './select.ts';
+
+type FileEntry = Extract<SnapshotEntry, { kind: 'file' }>;
+
+/** Extraction of the existing tar.ts error; keep its public re-export there. */
+export class SourceChangedError extends FleetError {
+  constructor(relativePath: string) {
+    super('usage', `${relativePath} changed after planning. Run again once edits settle.`);
+  }
+}
+
+/** Extraction of streamSnapshotFile's open/identity checks; caller closes it. */
+export async function openSnapshotFile(entry: FileEntry): Promise<FileHandle> {
+  let handle: FileHandle;
+  try { handle = await fs.open(entry.absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch { throw new SourceChangedError(entry.relativePath); }
+  try {
+    const stats = await handle.stat();
+    if (stats.ino !== entry.inode || stats.dev !== entry.device || stats.size !== entry.size) throw new SourceChangedError(entry.relativePath);
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+/** Extraction of streamSnapshotFile's bounded reader and final-chunk check. */
+export async function* snapshotFileChunks(handle: FileHandle, entry: FileEntry): AsyncGenerator<Buffer> {
+  const hash = createHash('sha256');
+  let remaining = entry.size;
+  while (remaining > 0) {
+    const buffer = Buffer.alloc(Math.min(1024 * 1024, remaining));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+    if (bytesRead === 0) throw new SourceChangedError(entry.relativePath);
+    const chunk = buffer.subarray(0, bytesRead);
+    hash.update(chunk);
+    remaining -= bytesRead;
+    if (remaining === 0 && hash.copy().digest('hex') !== entry.sha256) throw new SourceChangedError(entry.relativePath);
+    yield chunk;
+  }
+  if (entry.size === 0 && hash.digest('hex') !== entry.sha256) throw new SourceChangedError(entry.relativePath);
+}

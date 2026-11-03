@@ -1,0 +1,33 @@
+{
+  "name": "the-fleet",
+  "version": "0.5.9",
+  "description": "One shared coordinator for fleet discovery, reservations and finite test or build jobs.",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "fleet-runner": "bin/fleet-runner.js",
+    "the-fleet": "bin/the-fleet.js"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "remote/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "LICENSING.md",
+    "desktop/"
+  ]
+}

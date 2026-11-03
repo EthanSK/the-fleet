@@ -1,0 +1,141 @@
+{
+  "schemaVersion": 1,
+  "id": "fleet-runner",
+  "sync": {
+    "include": [
+      "package.json",
+      "package-lock.json",
+      "tsconfig.json",
+      "src/**",
+      "remote/**",
+      "test/**",
+      "bin/**"
+    ]
+  },
+  "profiles": {
+    "test": {
+      "description": "Run Fleet Runner lifecycle and unit tests",
+      "kind": "test",
+      "prepare": [
+        [
+          "npm",
+          "ci",
+          "--no-audit",
+          "--no-fund"
+        ]
+      ],
+      "argv": [
+        "npm",
+        "test"
+      ],
+      "timeoutMinutes": 5,
+      "requires": {
+        "tools": [
+          "node",
+          "npm",
+          "python3"
+        ]
+      },
+      "success": {
+        "minTestCount": {
+          "pattern": "(?:#|\u2139) tests (\\d+)",
+          "min": 219
+        }
+      }
+    },
+    "typecheck": {
+      "description": "Check TypeScript types",
+      "kind": "check",
+      "prepare": [
+        [
+          "npm",
+          "ci",
+          "--no-audit",
+          "--no-fund"
+        ]
+      ],
+      "argv": [
+        "npm",
+        "run",
+        "typecheck"
+      ],
+      "timeoutMinutes": 3,
+      "requires": {
+        "tools": [
+          "node",
+          "npm"
+        ]
+      }
+    },
+    "desktop": {
+      "description": "Build and test the desktop app, including headless view rendering",
+      "kind": "test",
+      "extraInputs": [
+        "desktop/Package.swift",
+        "desktop/Sources/**",
+        "desktop/Tests/**",
+        "desktop/Resources/**",
+        "desktop/Scripts/**"
+      ],
+      "cwd": "desktop",
+      "argv": [
+        "swift",
+        "test",
+        "--jobs",
+        "4",
+        "--scratch-path",
+        ".build.noindex"
+      ],
+      "timeoutMinutes": 20,
+      "requires": {
+        "tools": [
+          "swift"
+        ]
+      },
+      "success": {
+        "minTestCount": {
+          "pattern": "Executed (\\d+) tests?",
+          "min": 74
+        }
+      }
+    },
+    "desktop-package": {
+      "description": "Package and sign The Fleet.app without installing it",
+      "kind": "build",
+      "extraInputs": [
+        "desktop/Package.swift",
+        "desktop/Sources/**",
+        "desktop/Tests/**",
+        "desktop/Resources/**",
+        "desktop/Scripts/**",
+        "LICENSE"
+      ],
+      "argv": [
+        "bash",
+        "desktop/Scripts/package-app.sh"
+      ],
+      "env": {
+        "THE_FLEET_APP_BUILD_DIR": "@SRC_DIR@/desktop/package.noindex",
+        "THE_FLEET_SWIFT_SCRATCH_PATH": "@JOB_DIR@/swift.noindex"
+      },
+      "timeoutMinutes": 20,
+      "requires": {
+        "tools": [
+          "swift",
+          "iconutil",
+          "codesign",
+          "plutil",
+          "ditto"
+        ]
+      },
+      "success": {
+        "requireOutput": [
+          "Done: .*The Fleet\\.app \\(\\d+\\.\\d+\\.\\d+\\)"
+        ]
+      },
+      "artifacts": [
+        "desktop/package.noindex/The Fleet.app.zip"
+      ]
+    }
+  }
+}

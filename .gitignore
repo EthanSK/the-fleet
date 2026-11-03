@@ -1,0 +1,11 @@
+# Dependencies and local scratch. Runtime state lives outside the repository
+# in the private user-state directory (default ~/.fleet-runner).
+node_modules/
+*.noindex/
+work/
+.DS_Store
+/.outstanding-items/
+/worker
+# Desktop app build output (see desktop/Scripts/package-app.sh).
+/desktop/.build/
+/desktop/.swiftpm/
