@@ -1,0 +1,10 @@
+{
+  "repo": "the-fleet",
+  "app": "The Fleet",
+  "exe": "TheFleet",
+  "account": "org.the-fleet.app",
+  "plist": "desktop/Resources/Info.plist",
+  "prebuilt": "desktop/build.noindex/The Fleet.app.zip",
+  "version": "package",
+  "download": "The-Fleet-macOS-universal.zip"
+}

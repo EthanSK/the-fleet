@@ -1,0 +1,28 @@
+name: Check and package app
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  app:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - name: Test
+        run: swift test --package-path desktop --jobs 2 --scratch-path desktop/.build.noindex
+      - name: Build universal app and verify its actual loader
+        run: CODE_SIGN_IDENTITY=- THE_FLEET_ARCH=universal bash desktop/Scripts/package-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: the-fleet-prebuilt
+          path: |
+            desktop/build.noindex/The Fleet.app.zip
+            desktop/build.noindex/build-receipt.json
+          if-no-files-found: error
+          retention-days: 7

@@ -147,4 +147,13 @@ final class RenderingTests: XCTestCase {
         _ = render(LocationSettings(store: store, preferences: store.preferences).frame(height: 550), width: 600, scheme: .light)
         _ = render(LocationSettings(store: store, preferences: store.preferences).frame(height: 550), width: 600, scheme: .dark)
     }
+
+    func testAppUpdateControlsRenderWithoutAServiceOrLiveFeed() {
+        // XCTest has no app feed/key, so this draws the actual settings without
+        // starting Sparkle, touching the service, or downloading an update.
+        let updater = FleetAppUpdater()
+        XCTAssertFalse(updater.canCheck)
+        _ = render(AppUpdateSettings(updater: updater), width: 560, scheme: .light)
+        _ = render(AppUpdateSettings(updater: updater), width: 560, scheme: .dark)
+    }
 }

@@ -8,9 +8,11 @@ import FleetKit
 
 public struct FleetSettingsView: View {
     @Bindable var store: FleetStore
+    private let updater: FleetAppUpdater?
 
-    public init(store: FleetStore) {
+    public init(store: FleetStore, updater: FleetAppUpdater? = nil) {
         self.store = store
+        self.updater = updater
     }
 
     public var body: some View {
@@ -19,8 +21,38 @@ public struct FleetSettingsView: View {
                 .tabItem { Label("Service", systemImage: "antenna.radiowaves.left.and.right") }
             LocationSettings(store: store, preferences: store.preferences)
                 .tabItem { Label("Locations", systemImage: "folder") }
+            if let updater {
+                AppUpdateSettings(updater: updater)
+                    .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+            }
         }
         .frame(width: 600, height: 590)
+    }
+}
+
+struct AppUpdateSettings: View {
+    @ObservedObject var updater: FleetAppUpdater
+    @Environment(\.fleetInlineScroll) private var inline
+
+    var body: some View {
+        Group {
+            if inline { VStack(alignment: .leading, spacing: 16) { fields }.padding() }
+            else { Form { fields }.formStyle(.grouped) }
+        }
+    }
+
+    @ViewBuilder private var fields: some View {
+            Section("App Updates") {
+                Toggle("Check for updates automatically", isOn: Binding(
+                    get: { updater.automaticChecks }, set: { updater.automaticChecks = $0 }))
+                Toggle("Download updates automatically", isOn: Binding(
+                    get: { updater.automaticDownloads }, set: { updater.automaticDownloads = $0 }))
+                    .disabled(!updater.automaticChecks)
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheck)
+            }
+            Text("Updates restart this app. The service and its jobs keep running.")
+                .font(.caption).foregroundStyle(.secondary)
     }
 }
 

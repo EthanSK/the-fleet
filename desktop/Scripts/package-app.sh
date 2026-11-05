@@ -42,10 +42,16 @@ fi
 VERSION="$(plutil -extract version raw -o - "${REPO_ROOT}/package.json")"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "package.json has no numeric version."
 
+BUILD_FLAGS=()
+case "${THE_FLEET_ARCH:-$(uname -m)}" in
+  universal) BUILD_FLAGS=(--arch arm64 --arch x86_64) ;;
+  arm64|x86_64) BUILD_FLAGS=(--arch "${THE_FLEET_ARCH:-$(uname -m)}") ;;
+  *) fail "Unsupported architecture" ;;
+esac
 log "Building (${CONFIGURATION})"
-swift build --package-path "${DESKTOP_DIR}" --scratch-path "${SCRATCH_PATH}" -c "${CONFIGURATION}" --product TheFleet
-swift build --package-path "${DESKTOP_DIR}" --scratch-path "${SCRATCH_PATH}" -c "${CONFIGURATION}" --product fleet-app-icon
-BIN_PATH="$(swift build --package-path "${DESKTOP_DIR}" --scratch-path "${SCRATCH_PATH}" -c "${CONFIGURATION}" --show-bin-path)"
+swift build --jobs 2 "${BUILD_FLAGS[@]}" --package-path "${DESKTOP_DIR}" --scratch-path "${SCRATCH_PATH}" -c "${CONFIGURATION}" --product TheFleet
+swift build --jobs 2 "${BUILD_FLAGS[@]}" --package-path "${DESKTOP_DIR}" --scratch-path "${SCRATCH_PATH}" -c "${CONFIGURATION}" --product fleet-app-icon
+BIN_PATH="$(swift build --jobs 2 "${BUILD_FLAGS[@]}" --package-path "${DESKTOP_DIR}" --scratch-path "${SCRATCH_PATH}" -c "${CONFIGURATION}" --show-bin-path)"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/the-fleet-package.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
@@ -57,7 +63,8 @@ iconutil -c icns "${WORK_DIR}/AppIcon.iconset" -o "${WORK_DIR}/AppIcon.icns"
 log "Assembling The Fleet.app ${VERSION}"
 mkdir -p "${BUILD_DIR}"
 rm -rf "${APP_DIR}"
-mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources" "${APP_DIR}/Contents/Frameworks"
+ditto "${BIN_PATH}/Sparkle.framework" "${APP_DIR}/Contents/Frameworks/Sparkle.framework"
 cp "${BIN_PATH}/TheFleet" "${APP_DIR}/Contents/MacOS/TheFleet"
 cp "${WORK_DIR}/AppIcon.icns" "${APP_DIR}/Contents/Resources/AppIcon.icns"
 cp "${DESKTOP_DIR}/Resources/Info.plist" "${APP_DIR}/Contents/Info.plist"
@@ -68,8 +75,18 @@ plutil -lint "${APP_DIR}/Contents/Info.plist" >/dev/null
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 
 log "Signing ($([[ "${CODE_SIGN_IDENTITY}" == "-" ]] && printf 'ad-hoc' || printf '%s' "${CODE_SIGN_IDENTITY}"))"
-codesign --force --sign "${CODE_SIGN_IDENTITY}" "${APP_DIR}"
-codesign --verify --strict "${APP_DIR}"
+SIGN_FLAGS=(--timestamp=none)
+if [[ "$CODE_SIGN_IDENTITY" != "-" ]]; then SIGN_FLAGS+=(--options runtime); fi
+if [[ "$CODE_SIGN_IDENTITY" == "Developer ID Application:"* ]]; then SIGN_FLAGS=(--options runtime --timestamp); fi
+for component in "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" \
+  "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" \
+  "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc" \
+  "$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc" \
+  "$APP_DIR/Contents/Frameworks/Sparkle.framework" "$APP_DIR"; do
+  codesign --force "${SIGN_FLAGS[@]}" --sign "$CODE_SIGN_IDENTITY" "$component"
+done
+codesign --verify --deep --strict "$APP_DIR"
+"$APP_DIR/Contents/MacOS/TheFleet" --check-packaged-launch
 
 # A single verified artifact can return through The Fleet without losing the
 # executable mode or the app bundle's directory structure.
@@ -86,6 +103,8 @@ with zipfile.ZipFile(sys.argv[1], 'a', compression=zipfile.ZIP_DEFLATED) as arch
     for name in ('LICENSE', 'LICENSING.md'):
         archive.write(Path(sys.argv[2]) / name, name)
 PY
+
+python3 "${DESKTOP_DIR}/Scripts/build-receipt.py" "$ARCHIVE_PATH"
 
 log "Done: ${APP_DIR} (${VERSION})"
 log "Archive: ${ARCHIVE_PATH}"

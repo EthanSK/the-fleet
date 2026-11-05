@@ -72,6 +72,7 @@
       "kind": "test",
       "extraInputs": [
         "desktop/Package.swift",
+        "desktop/Package.resolved",
         "desktop/Sources/**",
         "desktop/Tests/**",
         "desktop/Resources/**",
@@ -82,7 +83,7 @@
         "swift",
         "test",
         "--jobs",
-        "4",
+        "2",
         "--scratch-path",
         ".build.noindex"
       ],
@@ -104,6 +105,7 @@
       "kind": "build",
       "extraInputs": [
         "desktop/Package.swift",
+        "desktop/Package.resolved",
         "desktop/Sources/**",
         "desktop/Tests/**",
         "desktop/Resources/**",

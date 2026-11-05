@@ -13,9 +13,9 @@ Former name: Fleet Runner. The `fleet-runner` command is a compatibility alias.
 
 ## Get started
 
-[Download the macOS app](https://github.com/EthanSK/the-fleet/releases/latest/download/The-Fleet-macOS-arm64.zip) · [Source and releases](https://github.com/EthanSK/the-fleet/releases)
+[Download the macOS app](https://github.com/EthanSK/the-fleet/releases/latest/download/The-Fleet-macOS-universal.zip) · [Source and releases](https://github.com/EthanSK/the-fleet/releases)
 
-The download is for Apple silicon Macs running macOS 14 or newer. Install the
+The universal download supports Apple silicon and Intel Macs running macOS 14 or newer. Install the
 shared command first, then unzip the app and move it to Applications:
 
 ```sh
@@ -30,10 +30,7 @@ The app and command use one local service. Set up your own worker pairings and
 private inventory using the guide below; no personal machines or keys are
 included. A worker needs the tools its jobs use, not a running copy of this app.
 
-The app is ad-hoc signed and is not notarized. macOS may block a downloaded
-copy; review [Apple's guidance for opening trusted apps](https://support.apple.com/en-gb/102445),
-or build from source using the Desktop app section below. No App Store or
-package-manager release is provided. The existing [No-Sale license](LICENSE)
+The download is signed with Developer ID and notarized by Apple. The app checks for updates daily while open, downloads them automatically by default, and uses Sparkle's standard signed-update dialogs. Use **The Fleet → Check for Updates…** or **Settings → Updates** to check now or change automatic checks and downloads. App updates leave the shared service and its jobs running; updating the separate command remains a source installation step. No App Store or package-manager release is provided. The existing [No-Sale license](LICENSE)
 permits internal use and free redistribution; selling the covered software
 requires a separate license.
 
@@ -546,3 +543,9 @@ that still explicitly name the old default home, without creating another
 writable state tree or a compatibility symlink. Two independent existing state
 folders are an error requiring the owner to resolve them. No reservations are
 released and no worker processes are stopped by migration.
+
+## Release updates
+
+Bump `package.json` and `package-lock.json` before publishing app changes. On a push to main, GitHub Actions tests the desktop package, builds a universal Mac app and binds its archive hash to the source commit. The private `the-fleet-release` runner verifies that exact artifact, signs it with Developer ID, notarizes and staples it, then signs the Sparkle feed using the Keychain key for `org.the-fleet.app`. It publishes the release only after these checks and verifies the public download. Existing release tags are never replaced.
+
+The signing Mac needs Developer ID, the notarytool profile selected by `NOTARY_PROFILE`, the app's Sparkle Keychain key and GitHub release access. Credentials stay private. This workflow publishes the desktop app; it does not restart, upgrade or replace the shared coordinator. See `.github/workflows/release.yml` and `scripts/release-app.py`.

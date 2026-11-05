@@ -1,0 +1,40 @@
+# Only trusted main builds reach the private signing Mac.
+name: Publish signed app
+on:
+  push:
+    branches: [main]
+    paths: ['desktop/**', 'package.json', 'package-lock.json', 'scripts/**', 'LICENSE', 'LICENSING.md', 'release-config.json', '.github/workflows/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: signed-app-release
+  cancel-in-progress: false
+jobs:
+  build:
+    uses: ./.github/workflows/check.yml
+  release:
+    needs: build
+    runs-on: [self-hosted, macOS, ARM64, the-fleet-release]
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      CODE_SIGN_IDENTITY: 'Developer ID Application: Ethan Sarif-Kattan (T34G959ZG8)'
+      NOTARY_PROFILE: ${{ vars.NOTARY_PROFILE || 'AgentFlowRelease' }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: actions/download-artifact@v4
+        with:
+          name: the-fleet-prebuilt
+          path: ${{ runner.temp }}/prebuilt.noindex
+      - name: Prepare verified Sparkle signing tools
+        run: |
+          curl --fail --location https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz -o "$RUNNER_TEMP/Sparkle.tar.xz"
+          echo '1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  '"$RUNNER_TEMP/Sparkle.tar.xz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/Sparkle.noindex"
+          tar -xf "$RUNNER_TEMP/Sparkle.tar.xz" -C "$RUNNER_TEMP/Sparkle.noindex"
+          echo "SPARKLE_TOOLS=$RUNNER_TEMP/Sparkle.noindex/bin" >> "$GITHUB_ENV"
+      - name: Sign, notarize and publish the exact CI app
+        run: python3 scripts/release-app.py "$RUNNER_TEMP/prebuilt.noindex"

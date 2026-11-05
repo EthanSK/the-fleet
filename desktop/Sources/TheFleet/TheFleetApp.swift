@@ -5,10 +5,10 @@ import SwiftUI
 import AppKit
 import FleetUI
 
-@main
 struct TheFleetApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = FleetStore.live()
+    @StateObject private var updater = FleetAppUpdater()
 
     var body: some Scene {
         WindowGroup("The Fleet", id: FleetWindowID.main) {
@@ -16,10 +16,16 @@ struct TheFleetApp: App {
                 .frame(minWidth: 780, minHeight: 520)
         }
         .defaultSize(width: 1180, height: 780)
-        .commands { FleetCommands(store: store) }
+        .commands {
+            FleetCommands(store: store)
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheck)
+            }
+        }
 
         Settings {
-            FleetSettingsView(store: store)
+            FleetSettingsView(store: store, updater: updater)
         }
 
         Window("The Fleet Help", id: FleetWindowID.help) {
