@@ -14,6 +14,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
+      - name: Check shared command types
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
       - name: Test
         run: swift test --package-path desktop --jobs 2 --scratch-path desktop/.build.noindex
       - name: Build universal app and verify its actual loader
