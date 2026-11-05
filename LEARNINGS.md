@@ -69,3 +69,7 @@
 - Ad-hoc test packages must not enable hardened-runtime library validation. Developer ID release signing re-signs Sparkle's nested helpers, then its framework and the outer app with the same identity and a timestamp.
 - Release signing accepts only the CI archive whose SHA-256 and source commit match its receipt. Apple must accept notarization, and the final archive must retain a validated stapled ticket before generating the signed feed. Signing keys remain in Keychain.
 - Sparkle updates only the desktop client. Its lifetime is separate from the shared coordinator and detached jobs; do not restart or replace that service during an app update. Check for Updates is distinct from the Fleet menu's worker-refresh Check Now.
+
+## 2026-11-05 — Reuse checksum-verified release signing tools
+
+Release workflows invoke the signing host's versioned Sparkle copy at `~/.local/share/sparkle-tools/2.10.1/bin`, after comparing it with the freshly downloaded, checksum-verified SDK. Provision this directory during signing-host setup; a missing or mismatched copy blocks signing instead of invoking an unverified or disposable helper. Keep per-app Keychain accounts and public-key checks. Reusing identical tool bytes does not promise approval survives a tool upgrade or a changed key.

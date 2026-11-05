@@ -35,6 +35,9 @@ jobs:
           echo '1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  '"$RUNNER_TEMP/Sparkle.tar.xz" | shasum -a 256 -c -
           mkdir -p "$RUNNER_TEMP/Sparkle.noindex"
           tar -xf "$RUNNER_TEMP/Sparkle.tar.xz" -C "$RUNNER_TEMP/Sparkle.noindex"
-          echo "SPARKLE_TOOLS=$RUNNER_TEMP/Sparkle.noindex/bin" >> "$GITHUB_ENV"
+          tools="$HOME/.local/share/sparkle-tools/2.10.1/bin"
+          # Provision this versioned copy during signing-host setup; reject missing or changed tools before any Keychain access.
+          diff -r "$RUNNER_TEMP/Sparkle.noindex/bin" "$tools"
+          echo "SPARKLE_TOOLS=$tools" >> "$GITHUB_ENV"
       - name: Sign, notarize and publish the exact CI app
         run: python3 scripts/release-app.py "$RUNNER_TEMP/prebuilt.noindex"
