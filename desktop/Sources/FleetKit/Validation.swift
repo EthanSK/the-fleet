@@ -9,9 +9,9 @@ public enum FleetValidation {
     }
 
     public static func workerNameProblem(_ name: String, existing: [String]) -> String? {
-        if name.isEmpty { return "Name the worker." }
+        if name.isEmpty { return "Name the ship." }
         if !matches(name, "^[a-z0-9][a-z0-9-]{0,47}$") { return "Use up to 48 lowercase letters, digits or hyphens, starting with a letter or digit." }
-        if existing.contains(where: { $0.lowercased() == name }) { return "A worker or alias already uses this name." }
+        if existing.contains(where: { $0.lowercased() == name }) { return "A ship or alias already uses this name." }
         return nil
     }
 

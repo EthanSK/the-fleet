@@ -57,6 +57,8 @@ public struct FleetNotice: Identifiable, Equatable {
     public var details: [String] = []
 }
 
+/// Ships is the user-facing name for worker computers (formerly "workers").
+/// Worker* model names and protocol fields stay compatible with existing clients.
 /// A registered worker merged with the coordinator's latest observation of it.
 public struct WorkerItem: Identifiable, Equatable {
     public let id: String

@@ -46,7 +46,7 @@ struct ProjectCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(project.id).font(.nameplate(16))
                 Spacer()
-                Text(project.defaultMachine.map { "Runs on \($0)" } ?? "Automatic worker selection")
+                Text(project.defaultMachine.map { "Runs on \($0)" } ?? "Automatic ship selection")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let description = project.description { Text(description).foregroundStyle(.secondary) }
@@ -101,7 +101,7 @@ struct ProfileRow: View {
             } else {
                 Button("Run…") { store.sheet = .runProfile(project: project.id, profile: profile.name) }
                     .disabled(store.workers.isEmpty || store.serviceNeedsUpdate)
-                    .help(store.workers.isEmpty ? "Add a worker first" : "Run \(project.id)/\(profile.name) on a worker")
+                    .help(store.workers.isEmpty ? "Add a ship first" : "Run \(project.id)/\(profile.name) on a ship")
             }
         }
         .padding(.vertical, 10)
@@ -110,7 +110,7 @@ struct ProfileRow: View {
     private var requirements: String {
         var parts: [String] = []
         if !profile.tools.isEmpty { parts.append("Needs \(profile.tools.joined(separator: ", "))") }
-        if profile.guiSession { parts.append("needs the worker's screen session") }
+        if profile.guiSession { parts.append("needs the ship's screen session") }
         return parts.joined(separator: " · ")
     }
 }
@@ -158,8 +158,8 @@ struct RunProfileSheet: View {
             Divider()
             Form {
                 Section {
-                    Picker("Worker", selection: $worker) {
-                        Text(project?.defaultMachine.map { "Project worker (\($0))" } ?? "Automatic").tag(String?.none)
+                    Picker("Ship", selection: $worker) {
+                        Text(project?.defaultMachine.map { "Project ship (\($0))" } ?? "Automatic").tag(String?.none)
                         Divider()
                         ForEach(store.workers) { item in
                             Text("\(item.id) — \(item.status.condition.title)").tag(Optional(item.id))
@@ -176,7 +176,7 @@ struct RunProfileSheet: View {
                 if let startError {
                     Text(startError).font(.callout).foregroundStyle(FleetPalette.stop).lineLimit(3).textSelection(.enabled)
                 } else {
-                    Text("Runs on the worker and keeps going if you quit The Fleet.").font(.caption).foregroundStyle(.secondary)
+                    Text("Runs on the ship and keeps going if you quit The Fleet.").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
@@ -191,9 +191,9 @@ struct RunProfileSheet: View {
     }
 
     private var placementNote: String {
-        if worker != nil { return "Runs only on this worker. If it's busy, nothing starts." }
-        if let pinned = project?.defaultMachine { return "\(projectID) names \(pinned) as its worker." }
-        return "Chooses a worker by load and available memory. A run that started stays on its worker."
+        if worker != nil { return "Runs only on this ship. If it's busy, nothing starts." }
+        if let pinned = project?.defaultMachine { return "\(projectID) names \(pinned) as its ship." }
+        return "Chooses a ship by load and available memory. A run that started stays on its ship."
     }
 
     @ViewBuilder private var planContent: some View {

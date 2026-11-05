@@ -138,7 +138,7 @@ struct LocationSettings: View {
             } header: {
                 Text("State")
             } footer: {
-                Text("Worker settings, registrations, reservations and run history live here. Use the same folder as the service and your other apps.")
+                Text("Ship settings, registrations, reservations and run history live here. Use the same folder as the service and your other apps.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {

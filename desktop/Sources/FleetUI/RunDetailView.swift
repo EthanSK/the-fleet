@@ -123,8 +123,8 @@ struct RunDetailView: View {
                 if let seconds = receipt.timing.jobSeconds { FactRow(label: "Job time", value: FleetFormat.duration(seconds)) }
                 FactRow(label: "Total time", value: FleetFormat.duration(receipt.timing.totalSeconds))
                 FactRow(label: "Cleanup", value: receipt.remote.lockReleased && !receipt.remote.processesRemaining
-                    ? "Confirmed; the worker's lock was released"
-                    : "Not confirmed. Check the worker before clearing anything.")
+                    ? "Confirmed; the ship's lock was released"
+                    : "Not confirmed. Check the ship before clearing anything.")
             }
         }
     }

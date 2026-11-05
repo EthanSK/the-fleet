@@ -2,9 +2,13 @@
 
 <img src="desktop/Resources/FleetShips.png" width="144" alt="The Fleet ship icon">
 
-One shared point of contact for your worker computers. Apps and agents ask The
-Fleet which worker is available, see current load and work, and reserve capacity.
+One shared point of contact for your ships: the remote computers that run your
+jobs. Apps and agents ask The Fleet which ship is available, see current load
+and work, and reserve capacity.
 They can then submit a managed job or use their own SSH connection.
+
+Ships are called `workers` in existing protocol fields and `Worker*` model types;
+those identifiers, command options and saved machine IDs remain compatible.
 
 The Fleet is a generic TypeScript/Node package with an Agent Bridge extension.
 It contains no personal machine inventory, addresses, credentials or project
@@ -26,9 +30,9 @@ npm link
 the-fleet --version
 ```
 
-The app and command use one local service. Set up your own worker pairings and
+The app and command use one local service. Set up your own ship pairings and
 private inventory using the guide below; no personal machines or keys are
-included. A worker needs the tools its jobs use, not a running copy of this app.
+included. A ship needs the tools its jobs use, not a running copy of this app.
 
 The download is signed with Developer ID and notarized by Apple. The app checks for updates daily while open, downloads them automatically by default, and uses Sparkle's standard signed-update dialogs. Use **The Fleet → Check for Updates…** or **Settings → Updates** to check now or change automatic checks and downloads. App updates leave the shared service and its jobs running; updating the separate command remains a source installation step. No App Store or package-manager release is provided. The existing [No-Sale license](LICENSE)
 permits internal use and free redistribution; selling the covered software
@@ -45,35 +49,35 @@ flowchart LR
   Service --> Config[Private inventory and project profiles]
   Service --> State[Load, processes, reservations, receipts]
   Service --> SSH[Agent Bridge pairing / SSH over Tailscale or LAN]
-  SSH --> Workers[Worker computers]
+  SSH --> Workers[Ships: remote computers]
   Agents -. own SSH after reservation .-> Workers
 ```
 
 - The local service listens on a user-private Unix socket. All normal CLI and
   Agent Bridge requests reach that same instance. A permanent kernel file lock
   prevents simultaneous startup, including launchd and concurrent callers.
-- Worker observations include their timestamp, load averages, CPU count, memory,
+- Ship observations include their timestamp, load averages, CPU count, memory,
   disk, detected heavy processes, remote job lock and recent jobs. Reservations
   identify the owning app and work. Detection of unrelated work is best effort;
   arbitrary SSH activity cannot be fully inferred from a process name.
 - Managed jobs reuse the existing remote supervisor: selected source transfer,
-  a per-worker kernel lock, deadlines, cancellation, verified outputs and receipts.
-  There is no permanent worker daemon. A test failure never triggers a replay on
-  another worker. Offline/busy refusals can advance to another registered worker.
+  a per-ship kernel lock, deadlines, cancellation, verified outputs and receipts.
+  There is no permanent ship daemon. A test failure never triggers a replay on
+  another ship. Offline/busy refusals can advance to another registered ship.
 - External SSH reservations coordinate cooperating clients. Renew while working,
   then stop your work and release. Expiry marks ownership uncertain; it does not
   claim that a process stopped. After a coordinator crash, `recover-reservations`
-  clears only managed reservations with freshly verified idle workers. External
+  clears only managed reservations with freshly verified idle ships. External
   reservations still require their token and an explicit verified release.
 - This is coordination for trusted local apps, not an executable-code sandbox.
   Your OS user can run arbitrary SSH and bypass it. Unreserved work is reported
   where observable but cannot be forced through this service.
 
-## Install and pair workers
+## Install and pair ships
 
-Requires Node 22.18+, Python 3 and SSH on the controller. Workers need Bash,
+Requires Node 22.18+, Python 3 and SSH on the controller. Ships need Bash,
 Python 3, tar and the tools their jobs use. The supervisor supports macOS and
-Linux; each actual worker/toolchain still needs qualification.
+Linux; each actual ship/toolchain still needs qualification.
 
 ```sh
 npm ci
@@ -86,15 +90,15 @@ the-fleet doctor --machine worker
 ```
 
 Agent Bridge owns host/user/SSH-key paths in its pairing config. The Fleet's
-private `~/.the-fleet/machines.json` owns worker limits, aliases, tool PATH and
-remote scratch root. One physical worker must use one scratch root. Never copy
+private `~/.the-fleet/machines.json` owns ship limits, aliases, tool PATH and
+remote scratch root. One physical ship must use one scratch root. Never copy
 private keys into a repository. SSH remembers new host identities and refuses
-changed host keys; verify a new worker's fingerprint through a trusted channel.
+changed host keys; verify a new ship's fingerprint through a trusted channel.
 
 For machines on different networks, install and sign in to Tailscale on each.
 Set the pairing's `internet_host` to the stable tailnet IP or DNS name. This route
-takes precedence over the LAN route. Enable the worker's normal SSH service and
-pair it using an authorized SSH key. For a dedicated unattended worker, its owner
+takes precedence over the LAN route. Enable the ship's normal SSH service and
+pair it using an authorized SSH key. For a dedicated unattended ship, its owner
 can disable device-key expiry in Tailscale's admin console; this is separate from
 SSH-key authorization. Do not store Tailscale login tokens in project files. See the official [key-expiry guide](https://tailscale.com/kb/1028/key-expiry) and [MagicDNS guide](https://tailscale.com/docs/features/magicdns).
 
@@ -108,7 +112,7 @@ installation. Legacy `FLEET_RUNNER_HOME` is also accepted. Different explicit
 homes are independent installations, not a global scheduler.
 
 `the-fleet <command> --help` (or `-h`) displays usage without starting or
-contacting the service, reserving a worker or executing the command. Help after
+contacting the service, reserving a ship or executing the command. Help after
 the `--` separator belongs to the profile command and is passed through normally.
 
 ## Agent Bridge extension
@@ -124,7 +128,7 @@ Agent Bridge. Existing MCP clients need a reconnect after installing new tools.
 
 A recipe is simply saved job details: which source files, command, preparation,
 limits and success evidence to use again. It is optional, and it is not a cached
-answer. Every run reads current source, checks the worker and produces a receipt.
+answer. Every run reads current source, checks the ship and produces a receipt.
 Saving a profile avoids repeatedly spelling out a complicated test command.
 
 For a one-time request, write JSON (or pipe it on stdin):
@@ -154,16 +158,16 @@ the-fleet run example test --source /path/to/another/worktree
 
 One-time requests are not registered. Saved manifests live wherever their owner
 chooses; registrations store a pointer and source root in the private state
-directory. Unpinned runs compare eligible workers' current memory pressure,
+directory. Unpinned runs compare eligible ships' current memory pressure,
 CPU load per core and occupied job-slot fraction, then available RAM and disk.
-The default worker breaks otherwise equal choices. Saved runs, one-time submit
+The default ship breaks otherwise equal choices. Saved runs, one-time submit
 requests and automatic external reservations use this same load comparison.
 Fresh coordinator reservations count immediately, before CPU observations catch
-up, so simultaneous clients do not all choose an apparently idle worker.
-A manifest's explicit `defaultMachine` preserves a project-specific worker rule.
-Use `--machine worker` to pin a saved run or one-time submit to one worker.
+up, so simultaneous clients do not all choose an apparently idle ship.
+A manifest's explicit `defaultMachine` preserves a project-specific ship rule.
+Use `--machine worker` to pin a saved run or one-time submit to one ship.
 Use `--machines first,second` for an ordered list of candidates. Submit rejects
-unknown, repeated or conflicting worker options instead of ignoring them.
+unknown, repeated or conflicting ship options instead of ignoring them.
 No automatic local fallback runs tests on your laptop.
 Physical hardware, real microphone/camera and live desktop tests still run on
 the computer that owns those resources.
@@ -177,11 +181,11 @@ registration is created. Keep `manifest.id` stable to reuse that project's rsync
 source copy; a cache name alone does not identify a project.
 
 `submit request.json --dry-run [--machine worker]` returns the existing source
-plan, including `source.digest`, without contacting a worker or starting a job.
-Use the same request and selected worker when comparing source after a build.
-It reads current on-disk files, so edited inputs change the digest. Worker-specific
+plan, including `source.digest`, without contacting a ship or starting a job.
+Use the same request and selected ship when comparing source after a build.
+It reads current on-disk files, so edited inputs change the digest. Ship-specific
 settings belong in private machine `env`; `requires.machineEnv` names settings a
-worker must supply. Machine values override generic profile values.
+ship must supply. Machine values override generic profile values.
 
 Each new job also returns a small `resources` summary in its receipt: sampled
 process-group peak RSS, peak summed process CPU percentages and sample count.
@@ -191,14 +195,14 @@ processes can be missed, RSS includes shared pages and ps CPU percentages are
 process-lifetime averages. This starts a bounded measurement history; it does
 not yet predict each workload's resource cost. The 500-entry controller index
 keeps these small summaries, job duration and source digest after the full receipt folder is pruned. Automatic
-receipts include `placement` values explaining the chosen worker.
+receipts include `placement` values explaining the chosen ship.
 
 ## Run outcomes
 
 Each receipt records one outcome. `passed`, `failed` and `timed-out` are the
 job's own result; failing tests are a valid result. `cancelled`, `aborted` and
 `refused` give no result: the run was cancelled, its source changed before the
-job started (`abort.path` names the file and nothing ran), or no worker accepted
+job started (`abort.path` names the file and nothing ran), or no ship accepted
 it. `error` means The Fleet itself failed: a connection or upload, output
 verification, or cleanup it couldn't confirm. A source change with unconfirmed
 cleanup stays an `error`. The desktop app shows results green or amber, no
@@ -232,7 +236,7 @@ registered main checkout. Submit the current recipe and source with the normal
 `PUT /v1/config/controller` accepts `{ "revision": "...", "runsDirectory":
 "/existing/results.noindex" }`; use `null` to restore the default. The directory
 must already exist. The private setting is stored in `settings.json`, separately
-from the worker inventory. New jobs read it without restarting the service;
+from the ship inventory. New jobs read it without restarting the service;
 already-started jobs keep their destination. An explicit per-request destination
 wins, followed by an environment override, the controller setting, then
 `runs.noindex` under the state folder. An unavailable configured drive refuses
@@ -240,14 +244,14 @@ writes instead of quietly filling another disk; settings remain accessible.
 
 ## Shared job capacity
 
-Ordinary managed jobs share a worker, up to private worker setting
+Ordinary managed jobs share a ship, up to private ship setting
 `limits.maxConcurrentJobs` (default 2, range 1–8). These are **job slots**,
 not estimates of a job's future CPU/RAM use. Fresh disk, available memory and
 kernel-pressure checks still apply; CPU load informs automatic placement and
 is also reported for the caller's judgment; job slots still cannot predict the cost of a new job, so CPU overcommit remains possible. Raw swap is display-only.
 
-Set a profile's `exclusive: true` for work which needs the worker alone.
-Declare worker-local conflicts in `resources`, for example `["port:4200"]`.
+Set a profile's `exclusive: true` for work which needs the ship alone.
+Declare ship-local conflicts in `resources`, for example `["port:4200"]`.
 GUI profiles automatically claim `desktop`. Each job still gets independent
 source, temporary files, cancellation, finalizers, outputs and receipts.
 Ordinary state includes every `assignments` entry and `capacity` with the
@@ -284,16 +288,16 @@ kernel admission inode with the shared readers, so they cannot overlap.
 target one shared job. Unscoped cancellation refuses to guess among shared
 jobs. Stale recovery needs exclusive admission and never kills a neighbour.
 `status` lists each shared job and its exact recovery target. The native app's
-Work tab lists simultaneous operations; worker cards identify an active shared
+Work tab lists simultaneous operations; ship cards identify an active shared
 job, and Overview uses the coordinator's capacity decision for its available
-worker count. No slot editor or multi-assignment worker-detail layout is added.
+ship count. No slot editor or multi-assignment ship-detail layout is added.
 
-## Worker inspection and safe cleanup
+## Ship inspection and safe cleanup
 
 `state --fresh` remains read-only. It now includes the top 20 processes by resident
 memory (RSS), process IDs, parent/group IDs, owner IDs, CPU use and elapsed time.
 Only executable names are collected, never command arguments. `memoryAssessment`
-flags high resident use for investigation: at least 512 MiB or 10% of worker RAM,
+flags high resident use for investigation: at least 512 MiB or 10% of ship RAM,
 whichever is larger. A snapshot does not establish a leak; shared resident pages
 can be counted in several processes. Raw swap remains display-only.
 
@@ -311,7 +315,7 @@ bounded output capture run before scratch deletion, preserving failed evidence
 and pending outputs. An uncertain cleanup keeps coordinator ownership for recovery.
 Interrupted managed reservations still use `recover-reservations`; external work
 still requires its token and explicit release. The latest maintenance result is
-included in worker state with its observation time.
+included in ship state with its observation time.
 
 ## Discovery and your own SSH
 
@@ -324,7 +328,7 @@ the-fleet release --id RESERVATION_ID --token RESERVATION_TOKEN
 
 Reserve returns connection information (including an SSH key path, never its
 contents), current health, a reservation ID and a private token. Keep the token
-out of shared logs. The worker remains reserved until release is verified.
+out of shared logs. The ship remains reserved until release is verified.
 Reservations are private mode-0600 state. Their stored token is hashed.
 
 ## Local API
@@ -335,7 +339,7 @@ HTTP runs over `~/.the-fleet/service.sock` (mode 0600), not an open TCP port.
 | Route | Purpose |
 | --- | --- |
 | GET /v1/health | Service identity and process ID |
-| GET /v1/state?fresh=1 | Worker observations and ownership |
+| GET /v1/state?fresh=1 | Ship observations and ownership |
 | POST /v1/submit | `{cwd, owner, request, machines?}` for one-time details |
 | POST /v1/submit/plan | `{cwd, request, machine?}` for a one-time source preview |
 | POST /v1/maintenance | `{machine?}` for foreground inspection and guarded stale-job cleanup |
@@ -343,10 +347,10 @@ HTTP runs over `~/.the-fleet/service.sock` (mode 0600), not an open TCP port.
 | GET /v1/operations/ID?offset=N | Poll output/result; also keeps job alive |
 | POST /v1/operations/ID/cancel | Idempotent cancellation; optional `{forceDisconnect: true}` explicitly disconnects SSH |
 | POST /v1/reservations | `{owner, label, machines?, ttlSeconds?, claim?}` |
-| POST /v1/activate | `{id, token}`: activate a drained worker after fresh idle proof |
+| POST /v1/activate | `{id, token}`: activate a drained ship after fresh idle proof |
 | POST /v1/renew or /v1/release | `{id, token, ttlSeconds?}` |
-| POST /v1/recover?machine=ID | Verify and clear interrupted managed ownership for one worker; omit the query for the whole fleet |
-| GET /v1/config | Worker settings, controller revision and effective results folder; environment names only |
+| POST /v1/recover?machine=ID | Verify and clear interrupted managed ownership for one ship; omit the query for the whole fleet |
+| GET /v1/config | Ship settings, controller revision and effective results folder; environment names only |
 | PUT /v1/config/controller | `{revision, runsDirectory: absoluteNoindexPath \| null}` shared results-folder default |
 | POST /v1/projects/resolve | `{source, manifestPath?}` resolves current-worktree registration or returns `project: null` |
 | GET /v1/pairings | Agent Bridge pairings with route kind; key paths reported as present, never shown |
@@ -355,9 +359,9 @@ HTTP runs over `~/.the-fleet/service.sock` (mode 0600), not an open TCP port.
 | PUT /v1/machines/ID | `{revision, ...changed fields}`; `env` is `{NAME: {keep: true} \| {value}}` |
 | DELETE /v1/machines/ID?revision=R | Remove the entry only; pairing, remote folder and runs stay |
 | GET /v1/projects | Registered projects and profiles from their live manifests |
-| POST /v1/projects/ID/plan | `{profile, machine?}` what a run would send; contacts no worker |
+| POST /v1/projects/ID/plan | `{profile, machine?}` what a run would send; contacts no ship |
 | POST /v1/projects/ID/run | `{profile, machine? \| machines?, owner?, detached?}` runs a saved profile |
-| GET /v1/operations | Retained operations with label, owner, worker, job IDs and, once finished, `outcome` |
+| GET /v1/operations | Retained operations with label, owner, ship, job IDs and, once finished, `outcome` |
 | GET /v1/runs?limit=N&project=P | Finished runs from receipts, across run stores |
 | GET /v1/runs/JOB?tail=BYTES | One receipt with bounded stdout/stderr tails |
 
@@ -375,9 +379,9 @@ abandoned work is still cancelled. The coordinator records where each managed
 receipt was written in a bounded `run-index.json`, so run history covers every
 run store; a pruned or unmounted receipt is listed as unavailable.
 
-Worker-settings writes re-validate the whole registry with the CLI's parser and
+Ship-settings writes re-validate the whole registry with the CLI's parser and
 need the `revision` they were based on; a stale revision gets HTTP 409 with
-`code: "revision-conflict"`. Changing a worker's pairing or remote folder is
+`code: "revision-conflict"`. Changing a ship's pairing or remote folder is
 refused while it has a reservation or coordinated run; moving the remote folder
 also needs the current folder's job lock verified free. A run admitted with
 superseded route or folder settings is refused before it starts. Errors carry a
@@ -386,7 +390,7 @@ superseded route or folder settings is refused before it starts. Errors carry a
 See [managed execution](docs/execution.md) for source selection, optional rsync,
 artifacts, cache limits, finalizers and recovery. See `the-fleet --help` for the
 complete CLI. Internal `fleet-runner` protocol/path markers remain stable for
-existing workers; they are not a second implementation.
+existing ships; they are not a second implementation.
 
 Returned regular-file artifacts retain their tar/PAX modification times, to the
 precision supported by Node and the destination filesystem. This also applies
@@ -396,8 +400,8 @@ timestamps are not restored.
 
 ## Large temporary output archives
 
-Project `the-fleet.json` files describe jobs. Personal worker locations and devices
-belong only in the private machine registry. A worker can opt into large-archive
+Project `the-fleet.json` files describe jobs. Personal ship locations and devices
+belong only in the private machine registry. A ship can opt into large-archive
 scratch through its `largeScratch` setting, for example:
 
 ```json
@@ -421,9 +425,9 @@ free space are refused; the runner never creates a missing mount point.
 Set this object through the existing revision-checked `PUT /v1/machines/ID`
 API (along with its current `revision`); `largeScratch: null` disables it.
 Unrelated settings edits retain it. Changing the destination requires that
-worker to be unreserved. Keep real drive names and UUIDs out of project recipes.
+ship to be unreserved. Keep real drive names and UUIDs out of project recipes.
 
-The automatic consumer is the worker's output-transfer `artifacts.tar.part`
+The automatic consumer is the ship's output-transfer `artifacts.tar.part`
 and `artifacts.tar`. When the combined logical size of declared outputs reaches
 `minFileMiB` (default64), their archive is written into a unique owned directory
 on the verified volume. Space for that archive plus `minFreeGiB` (default8)
@@ -431,7 +435,7 @@ must remain available. This is a space check, not a filesystem quota.
 
 Small output archives, source, dependencies, caches, ordinary `TMPDIR` and Docker
 keep their existing locations. This setting leaves hot job/cache paths unchanged. Upload tar is streamed directly and has
-no temporary worker archive to relocate. This setting does not redirect all
+no temporary ship archive to relocate. This setting does not redirect all
 temporary files or change where a project's build tools write their outputs.
 
 The archive reader/writer and cleanup use pinned file descriptors and per-job
@@ -445,7 +449,7 @@ The root ownership marker and allocation guard remain for later jobs.
 
 The shared coordinator sends one controller-local notification when an actual
 operation encounters an internal low-disk refusal or an external archive-space
-refusal. A skipped worker still counts when another worker succeeds. Status
+refusal. A skipped ship still counts when another ship succeeds. Status
 polling, ordinary busy slots, memory refusals and normal size-based USB use stay
 quiet. The existing admission, archive selection and cleanup rules do not change.
 
@@ -459,14 +463,14 @@ background polling is installed.
 ## Desktop app
 
 `desktop/` is a native SwiftUI app named The Fleet that lives in the Dock. It
-shows each worker as a faceplate with its device, status, one LED per CPU core
+shows each ship as a faceplate with its device, status, one LED per CPU core
 lit to the current load, memory, disk and current owner; drills into health,
-recent jobs, reservations and connection; adds workers from Agent Bridge
+recent jobs, reservations and connection; adds ships from Agent Bridge
 pairings, edits their settings and removes them; and runs saved profiles, shows
 live and finished work with receipts and logs, and cancels coordinated runs.
 
 It is only a client of the one local coordinator over its socket. It never runs
-jobs, stores worker settings or copies connection details. When nothing is
+jobs, stores ship settings or copies connection details. When nothing is
 listening it can start the service through the installed CLI's own kernel-locked
 auto-start, detached from the app. Quitting the app leaves the service and every
 job running; runs it starts are `detached`. It finds the service folder and CLI
@@ -486,7 +490,7 @@ newer. At runtime the app needs The Fleet installed on the same Mac (Node 22.18+
 Python 3, SSH); copy the app to /Applications yourself. Packaging also creates
 `The Fleet.app.zip`, preserving the bundle and executable permissions. The
 `desktop-package` profile returns that ZIP through The Fleet with its hash
-verified, so a worker build can be installed on the coordinating Mac.
+verified, so a ship build can be installed on the coordinating Mac.
 
 ## Development
 
@@ -499,9 +503,9 @@ the-fleet run fleet-runner desktop            # Swift tests, including headless 
 the-fleet run fleet-runner desktop-package    # packages and signs the app on a worker
 ```
 
-The core test suite uses disposable worker fixtures. Service tests cover
+The core test suite uses disposable ship fixtures. Service tests cover
 concurrent clients, alias contention, expiry, restart, API validation and kernel
-singleton startup. Qualify lifecycle changes on a real worker too. Test fixtures
+singleton startup. Qualify lifecycle changes on a real ship too. Test fixtures
 do not establish physical hardware or live desktop acceptance.
 
 First-party code uses No-Sale Terms 1.0; see LICENSE and LICENSING.md. Source and the macOS download are published in this repository and its Releases.
@@ -512,7 +516,7 @@ New installations use `~/.the-fleet`. Existing `~/.fleet-runner` state keeps
 working until its owner explicitly migrates it. Both CLI names, the Agent
 Bridge extension and the desktop app still contact one coordinator. Custom
 `THE_FLEET_HOME` (and legacy `FLEET_RUNNER_HOME`) folders keep their explicit
-locations. Remote worker scratch names and protocol identifiers do not change.
+locations. Remote ship scratch names and protocol identifiers do not change.
 
 Finish running jobs. On macOS, unload the login service if it is loaded:
 
@@ -531,7 +535,7 @@ the-fleet migrate-home
 The dry run makes no changes; it does not promise the service is stopped. The
 actual migration refuses a live coordinator and locks out simultaneous startup.
 It atomically renames the existing folder on the same filesystem; it does not
-copy, merge or delete results. Worker settings, reservation ownership and
+copy, merge or delete results. Ship settings, reservation ownership and
 immutable receipt bytes stay unchanged. Mutable history and registration
 pointers inside the old folder move with it; external result folders stay put.
 The owned login-service plist is updated when present. Reload that service after
@@ -542,7 +546,7 @@ refuses coordinator startup. A completed migration record redirects clients
 that still explicitly name the old default home, without creating another
 writable state tree or a compatibility symlink. Two independent existing state
 folders are an error requiring the owner to resolve them. No reservations are
-released and no worker processes are stopped by migration.
+released and no ship processes are stopped by migration.
 
 ## Release updates
 

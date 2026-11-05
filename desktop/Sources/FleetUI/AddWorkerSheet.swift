@@ -27,7 +27,7 @@ struct AddWorkerSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Add Worker").font(.nameplate(20, weight: .bold))
+                Text("Add Ship").font(.nameplate(20, weight: .bold))
                 Text("Choose a computer paired with Agent Bridge. The pairing keeps its address and key.")
                     .foregroundStyle(.secondary)
             }
@@ -45,7 +45,7 @@ struct AddWorkerSheet: View {
                 }
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Add worker") { Task { await save() } }
+                Button("Add ship") { Task { await save() } }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canSave)
             }
@@ -104,8 +104,8 @@ struct AddWorkerSheet: View {
                     TextField("Name", text: $name)
                     if let problem = nameProblem { Text(problem).font(.caption).foregroundStyle(FleetPalette.stop) }
                     TextField("Description", text: $details, prompt: Text("Optional, such as Desk Mac mini"))
-                    Toggle("Default worker", isOn: $makeDefault)
-                        .help("Preferred when worker load and available resources are equal.")
+                    Toggle("Default ship", isOn: $makeDefault)
+                        .help("Preferred when ship load and available resources are equal.")
                 } footer: {
                     Text("Commands use this name, as in the-fleet run project test --machine \(name.isEmpty ? "name" : name).")
                         .font(.caption).foregroundStyle(.secondary)
@@ -116,7 +116,7 @@ struct AddWorkerSheet: View {
                         Text(problem).font(.caption).foregroundStyle(FleetPalette.stop)
                     }
                 } footer: {
-                    Text("Jobs run in this folder on the worker, and its job lock lives there. Use one folder per computer.")
+                    Text("Jobs run in this folder on the ship, and its job lock lives there. Use one folder per computer.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -195,7 +195,7 @@ struct AddWorkerSheet: View {
         } catch let error as FleetAPIError {
             if case .revisionConflict = error {
                 await store.reloadConfiguration()
-                saveError = "Worker settings changed somewhere else. They're reloaded; add the worker again."
+                saveError = "Ship settings changed somewhere else. They're reloaded; add the ship again."
             } else {
                 saveError = error.errorDescription
             }
@@ -258,7 +258,7 @@ struct CheckResultView: View {
             NoticeLine(text: error, symbol: "xmark.octagon.fill", tint: FleetPalette.stop)
         } else if let check {
             if check.dispatchingComputer {
-                NoticeLine(text: "This is this Mac. Workers must be other computers.", symbol: "hand.raised.fill", tint: FleetPalette.stop)
+                NoticeLine(text: "This is this Mac. Ships must be other computers.", symbol: "hand.raised.fill", tint: FleetPalette.stop)
             } else if let same = check.sameAs {
                 NoticeLine(text: "This is the same computer as \(same). Add \(pairing.target) as an alias in \(same)'s settings instead, so they share one lock.", symbol: "hand.raised.fill", tint: FleetPalette.stop)
             } else if check.reachable, let health = check.health {

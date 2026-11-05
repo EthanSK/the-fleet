@@ -25,13 +25,13 @@ struct WorkerDetailView: View {
                         } label: {
                             Label("Settings", systemImage: "slider.horizontal.3")
                         }
-                        .help("Worker settings")
+                        .help("Ship settings")
                         .disabled(worker.settings == nil)
                     }
                 }
         } else {
             ContentUnavailableView {
-                Label("No worker named \(workerID)", systemImage: "questionmark.square.dashed")
+                Label("No ship named \(workerID)", systemImage: "questionmark.square.dashed")
             } description: {
                 Text("It may have been removed somewhere else.")
             } actions: {
@@ -117,7 +117,7 @@ struct WorkerDetailView: View {
                     }
                 }
                 if job.orphaned {
-                    NoticeLine(text: "Its supervisor stopped, but the job's processes are still running. Stop them from Terminal after checking the worker:")
+                    NoticeLine(text: "Its supervisor stopped, but the job's processes are still running. Stop them from Terminal after checking the ship:")
                     CommandBlock(command: "the-fleet cancel --machine \(worker.id)")
                 } else if let operationID = job.operationID {
                     HStack(spacing: 10) {
@@ -184,7 +184,7 @@ struct WorkerDetailView: View {
             let released = try await store.recoverManagedReservations(workerID: worker.id)
             actionMessage = released.isEmpty
                 ? "\(worker.id) isn't confirmed idle, so its ownership was kept."
-                : "Released \(FleetFormat.plural(released.count, "reservation")) after confirming the worker is idle."
+                : "Released \(FleetFormat.plural(released.count, "reservation")) after confirming the ship is idle."
         } catch {
             actionMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
@@ -229,7 +229,7 @@ struct WorkerDetailView: View {
                         FactRow(label: "Disk", value: "\(FleetFormat.disk(free)) free\(worker.settings.map { " · needs \(GiB.text($0.limits.minFreeDiskGiB))" } ?? "")")
                     }
                     if let gui = health.guiSession {
-                        FactRow(label: "Console", value: gui ? "\(health.user ?? "The worker's user") is signed in at the screen" : "No one signed in at the screen")
+                        FactRow(label: "Console", value: gui ? "\(health.user ?? "The ship's user") is signed in at the screen" : "No one signed in at the screen")
                     }
                     if let heavy = health.heavy, !heavy.isEmpty { FactRow(label: "Other work", value: HeavyProcessSummary.text(heavy)) }
                     if let missing = health.missingBaseTools, !missing.isEmpty { FactRow(label: "Missing", value: missing.joined(separator: ", ")) }
@@ -248,7 +248,7 @@ struct WorkerDetailView: View {
         SectionCard(title: "Recent jobs") {
             let jobs = worker.observation?.recentJobs ?? []
             if jobs.isEmpty {
-                Text(worker.health == nil ? "Shown once the worker answers." : "No finished jobs kept on this worker.")
+                Text(worker.health == nil ? "Shown once the ship answers." : "No finished jobs kept on this ship.")
                     .font(.callout).foregroundStyle(.secondary)
             } else {
                 VStack(alignment: .leading, spacing: 8) {

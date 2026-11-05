@@ -71,7 +71,7 @@ public struct WorkerStatus: Sendable, Equatable {
             return WorkerStatus(condition: .unreachable, detail: observation.reasons.first, job: nil, reservation: nil)
         }
         if observation.reasons.contains(dispatcherReason) {
-            return WorkerStatus(condition: .dispatcher, detail: "Workers must be other computers.", job: nil, reservation: nil)
+            return WorkerStatus(condition: .dispatcher, detail: "Ships must be other computers.", job: nil, reservation: nil)
         }
         let leases = observation.assignments ?? reservations.filter { $0.machineId == observation.id }
         let reservation = observation.reservation ?? leases.first

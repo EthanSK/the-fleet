@@ -210,7 +210,7 @@ final class FormattingTests: XCTestCase {
 
     func testExitCodesAreNamed() {
         XCTAssertEqual(ExitMeaning.title(0), "Passed")
-        XCTAssertEqual(ExitMeaning.title(4), "No worker available")
+        XCTAssertEqual(ExitMeaning.title(4), "No ship available")
         XCTAssertEqual(ExitMeaning.title(7), "Cancelled")
         XCTAssertEqual(ExitMeaning.title(42), "Exit 42")
     }

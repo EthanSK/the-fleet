@@ -365,7 +365,7 @@ struct RefreshButton: View {
                 Label("Check now", systemImage: "arrow.clockwise")
             }
         }
-        .help("Check every worker now")
+        .help("Check every ship now")
         .disabled(store.isRefreshing)
     }
 }

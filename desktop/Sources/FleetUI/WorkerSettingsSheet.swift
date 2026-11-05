@@ -106,7 +106,7 @@ struct WorkerSettingsSheet: View {
             HStack(spacing: 12) {
                 if let worker = store.worker(workerID) { DeviceGlyph(kind: worker.kind, size: 40) }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Worker Settings").font(.nameplate(18, weight: .bold))
+                    Text("Ship Settings").font(.nameplate(18, weight: .bold))
                     Text(workerID).font(.data(12)).foregroundStyle(.secondary)
                 }
             }
@@ -182,8 +182,8 @@ struct WorkerSettingsSheet: View {
         Form {
             Section("General") {
                 TextField("Description", text: binding(\.description, fallback: ""), prompt: Text("Optional"))
-                Toggle("Default worker", isOn: binding(\.isDefault, fallback: false))
-                    .help("Preferred when worker load and available resources are equal.")
+                Toggle("Default ship", isOn: binding(\.isDefault, fallback: false))
+                    .help("Preferred when ship load and available resources are equal.")
                 Picker("Icon", selection: $iconChoice) {
                     Text("Automatic (\(store.automaticDeviceKind(id: workerID).title))").tag("")
                     Divider()
@@ -223,7 +223,7 @@ struct WorkerSettingsSheet: View {
             } header: {
                 Text("Tools")
             } footer: {
-                Text("PATH additions come before the worker's own PATH for every job. Environment values stay in the worker settings and are never shown here.")
+                Text("PATH additions come before the ship's own PATH for every job. Environment values stay in the ship settings and are never shown here.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -262,12 +262,12 @@ struct WorkerSettingsSheet: View {
             } header: {
                 Text("Admission")
             } footer: {
-                Text("The Fleet refuses new jobs on this worker when these limits aren't met. Running jobs keep the settings they started with.")
+                Text("The Fleet refuses new jobs on this ship when these limits aren't met. Running jobs keep the settings they started with.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
-                Button("Remove worker…", role: .destructive) { confirmingRemove = true }
+                Button("Remove ship…", role: .destructive) { confirmingRemove = true }
             } footer: {
                 Text("Removes only this entry. The pairing, remote folder and run history stay.").font(.caption).foregroundStyle(.secondary)
             }

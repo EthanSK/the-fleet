@@ -38,10 +38,10 @@ struct OverviewView: View {
                     }
                 }
                 if let error = store.stateError {
-                    NoticeLine(text: "Couldn't check the workers: \(error)", symbol: "exclamationmark.triangle.fill", tint: FleetPalette.stop)
+                    NoticeLine(text: "Couldn't check the ships: \(error)", symbol: "exclamationmark.triangle.fill", tint: FleetPalette.stop)
                 }
                 if let error = store.configurationError {
-                    NoticeLine(text: "Couldn't read worker settings: \(error)", symbol: "exclamationmark.triangle.fill", tint: FleetPalette.stop)
+                    NoticeLine(text: "Couldn't read ship settings: \(error)", symbol: "exclamationmark.triangle.fill", tint: FleetPalette.stop)
                 }
             }
             .padding(24)
@@ -55,9 +55,9 @@ struct OverviewView: View {
                 Button {
                     store.sheet = .addWorker
                 } label: {
-                    Label("Add worker", systemImage: "plus")
+                    Label("Add ship", systemImage: "plus")
                 }
-                .help("Add a paired computer as a worker")
+                .help("Add a paired computer as a ship")
                 .disabled(store.serviceNeedsUpdate)
             }
         }
@@ -69,7 +69,7 @@ struct OverviewView: View {
         let available = workers.filter { $0.observation?.available == true }.count
         let running = workers.filter { $0.status.condition == .running }.count
         VStack(alignment: .leading, spacing: 6) {
-            Text(workers.isEmpty ? "No workers yet" : "\(available) of \(FleetFormat.plural(workers.count, "worker")) available")
+            Text(workers.isEmpty ? "No ships yet" : "\(available) of \(FleetFormat.plural(workers.count, "ship")) available")
                 .font(.nameplate(26, weight: .bold))
             HStack(spacing: 6) {
                 if running > 0 { Text("\(running) running") }
@@ -77,7 +77,7 @@ struct OverviewView: View {
                 if let observed = store.stateObservedAt {
                     Text("Checked \(FleetFormat.ago(observed, now: store.now))")
                 } else if !workers.isEmpty {
-                    Text("Checking workers…")
+                    Text("Checking ships…")
                 }
             }
             .font(.callout)
@@ -128,7 +128,7 @@ struct DeviceCard: View {
                             .tracking(1.4)
                             .lineLimit(1)
                         if worker.isDefault {
-                            Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.secondary).help("Default worker")
+                            Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.secondary).help("Default ship")
                         }
                         Spacer(minLength: 8)
                         StatusBadge(condition: worker.status.condition)
@@ -295,7 +295,7 @@ struct NoWorkersView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
-                Button("Add worker") { store.sheet = .addWorker }
+                Button("Add ship") { store.sheet = .addWorker }
                     .buttonStyle(.borderedProminent)
                     .disabled(store.serviceNeedsUpdate)
                 Text("Haven't paired one yet?").foregroundStyle(.secondary)

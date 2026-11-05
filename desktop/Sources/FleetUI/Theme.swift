@@ -112,7 +112,7 @@ enum OutcomeText {
         case "timed-out": return "The job ran past its time limit."
         case "cancelled": return "Cancelled before it finished."
         case "aborted": return "Source changed before the job started, so nothing ran."
-        case "refused": return "No worker accepted the job, so nothing ran."
+        case "refused": return "No ship accepted the job, so nothing ran."
         case "error": return "The Fleet couldn't run, verify or clean up this job."
         default: return nil
         }

@@ -98,7 +98,7 @@ struct OperationStrip: View {
 
     private func detail(outcome: String) -> String {
         if operation.isRunning {
-            let line = operation.cancelRequested ? "Cancelling" : (operation.lastLine ?? (operation.machineId == nil ? "Choosing a worker" : "Starting"))
+            let line = operation.cancelRequested ? "Cancelling" : (operation.lastLine ?? (operation.machineId == nil ? "Choosing a ship" : "Starting"))
             return "\(operation.owner) · \(line)"
         }
         let meaning = OutcomeText.meaning(of: outcome, exitCode: operation.exitCode) ?? "Ended"
@@ -211,7 +211,7 @@ struct OperationDetailView: View {
                         NavigationLink(value: FleetRoute.run(jobID)) { Text(jobIDs.count > 1 ? "Receipt \(jobID)" : "Receipt") }
                     }
                     if (feed.latest?.cancelRequested ?? summary?.cancelRequested) == true, running {
-                        Text("Cancelling. The worker stops the job and cleans up.").font(.caption).foregroundStyle(.secondary)
+                        Text("Cancelling. The ship stops the job and cleans up.").font(.caption).foregroundStyle(.secondary)
                     }
                     if let cancelError { Text(cancelError).font(.caption).foregroundStyle(FleetPalette.stop) }
                 }
@@ -250,7 +250,7 @@ struct OperationDetailView: View {
             }
             Button("Keep running", role: .cancel) {}
         } message: {
-            Text("The worker stops the job and cleans up. Its receipt records the cancellation.")
+            Text("The ship stops the job and cleans up. Its receipt records the cancellation.")
         }
     }
 }

@@ -13,7 +13,7 @@ public struct FleetCommands: Commands {
     public var body: some Commands {
         // One main window; the File menu adds workers instead.
         CommandGroup(replacing: .newItem) {
-            Button("Add Worker…") { store.sheet = .addWorker }
+            Button("Add Ship…") { store.sheet = .addWorker }
                 .keyboardShortcut("n")
                 .disabled(!store.connection.isConnected || store.serviceNeedsUpdate)
         }

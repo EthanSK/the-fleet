@@ -95,11 +95,11 @@ struct FleetSidebar: View {
                     WorkerSidebarRow(worker: worker).tag(SidebarItem.worker(worker.id))
                 }
                 if store.workers.isEmpty, store.connection.isConnected {
-                    Text("No workers yet").foregroundStyle(.secondary)
+                    Text("No ships yet").foregroundStyle(.secondary)
                 }
             } header: {
                 HStack {
-                    Text("Workers")
+                    Text("Ships")
                     Spacer()
                     Button {
                         store.sheet = .addWorker
@@ -107,8 +107,8 @@ struct FleetSidebar: View {
                         Image(systemName: "plus")
                     }
                     .buttonStyle(.borderless)
-                    .help("Add worker")
-                    .accessibilityLabel("Add worker")
+                    .help("Add ship")
+                    .accessibilityLabel("Add ship")
                     .disabled(!store.connection.isConnected || store.serviceNeedsUpdate)
                 }
             }
@@ -129,13 +129,13 @@ struct WorkerSidebarRow: View {
             Text(worker.id)
                 .lineLimit(1)
             if worker.isDefault {
-                Image(systemName: "star.fill").font(.system(size: 8)).foregroundStyle(.secondary).help("Default worker")
+                Image(systemName: "star.fill").font(.system(size: 8)).foregroundStyle(.secondary).help("Default ship")
             }
             Spacer(minLength: 4)
             StatusLamp(color: FleetPalette.color(for: worker.status.condition), size: 7, pulsing: worker.status.condition == .running)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(worker.id), \(worker.status.condition.title)\(worker.isDefault ? ", default worker" : "")")
+        .accessibilityLabel("\(worker.id), \(worker.status.condition.title)\(worker.isDefault ? ", default ship" : "")")
     }
 }
 
@@ -193,7 +193,7 @@ struct ServiceDownView: View {
                     .foregroundStyle(.secondary)
                 Text(problem == nil ? "The Fleet isn't running" : "Can't reach The Fleet")
                     .font(.nameplate(24))
-                Text(problem ?? "Start the shared service to see your workers and their work.")
+                Text(problem ?? "Start the shared service to see your ships and their work.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let core = store.locations.core {
@@ -245,7 +245,7 @@ struct OutdatedServiceBanner: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(FleetPalette.hold)
             VStack(alignment: .leading, spacing: 6) {
-                Text("The running service is older than this app. Restart it to show worker settings, projects and run history.")
+                Text("The running service is older than this app. Restart it to show ship settings, projects and run history.")
                     .fixedSize(horizontal: false, vertical: true)
                 Text("Stop it once its jobs finish; the login service or this app starts the current version.")
                     .font(.caption).foregroundStyle(.secondary)
