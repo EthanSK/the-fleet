@@ -40,12 +40,14 @@ enum UIFixture {
      "reservations":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaa","machineId":"desk","fingerprint":"f","owner":"The Fleet app","label":"example/test","kind":"managed","createdAt":"2026-11-01T22:06:01.000Z","expiresAt":null,"state":"active"}]}
     """#)
 
-    static func operation(_ id: String, status: String = "running", project: String? = "example", exitCode: Int? = nil, jobIds: [String] = [], finishedAt: String? = nil, machine: String? = "desk") -> OperationSummary {
+    /// `outcome` is omitted from the JSON when nil, as older services do.
+    static func operation(_ id: String, status: String = "running", project: String? = "example", exitCode: Int? = nil, outcome: String? = nil, jobIds: [String] = [], finishedAt: String? = nil, machine: String? = "desk") -> OperationSummary {
         let projectJSON = project.map { "\"\($0)\"" } ?? "null"
         let finished = finishedAt.map { "\"\($0)\"" } ?? "null"
         let machineJSON = machine.map { "\"\($0)\"" } ?? "null"
+        let outcomeJSON = outcome.map { #","outcome":"\#($0)""# } ?? ""
         let jobs = String(decoding: try! JSONEncoder().encode(jobIds), as: UTF8.self)
-        return decode(#"{"id":"\#(id)","owner":"The Fleet app","kind":"run","label":"example/test","project":\#(projectJSON),"profile":"test","status":"\#(status)","exitCode":\#(exitCode.map(String.init) ?? "null"),"createdAt":"2026-11-01T22:06:00.000Z","finishedAt":\#(finished),"detached":true,"cancelRequested":false,"jobIds":\#(jobs),"machineId":\#(machineJSON),"lastLine":"Uploading to desk"}"#)
+        return decode(#"{"id":"\#(id)","owner":"The Fleet app","kind":"run","label":"example/test","project":\#(projectJSON),"profile":"test","status":"\#(status)","exitCode":\#(exitCode.map(String.init) ?? "null")\#(outcomeJSON),"createdAt":"2026-11-01T22:06:00.000Z","finishedAt":\#(finished),"detached":true,"cancelRequested":false,"jobIds":\#(jobs),"machineId":\#(machineJSON),"lastLine":"Uploading to desk"}"#)
     }
 
     static let runs = decode(RunList.self, #"""

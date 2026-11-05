@@ -42,13 +42,28 @@ public enum FleetPalette {
         }
     }
 
-    public static func color(forOutcome outcome: String) -> Color {
+    enum Lamp: Equatable { case cleared, taxiway, hold, stop, idle }
+
+    /// A run's verdict is green or amber: failing tests are a valid result.
+    /// Work that never reached a verdict (cancelled, aborted by a source
+    /// change, refused) is grey. Red is kept for The Fleet's own errors.
+    static func lamp(forOutcome outcome: String) -> Lamp {
         switch outcome {
-        case "passed": return cleared
-        case "running": return taxiway
-        case "failed", "error": return stop
-        case "timed-out", "refused": return hold
-        default: return idle
+        case "passed": return .cleared
+        case "running": return .taxiway
+        case "failed", "timed-out": return .hold
+        case "error": return .stop
+        default: return .idle
+        }
+    }
+
+    public static func color(forOutcome outcome: String) -> Color {
+        switch lamp(forOutcome: outcome) {
+        case .cleared: return cleared
+        case .taxiway: return taxiway
+        case .hold: return hold
+        case .stop: return stop
+        case .idle: return idle
         }
     }
 
@@ -82,6 +97,7 @@ enum OutcomeText {
         case "failed": return "Failed"
         case "timed-out": return "Timed out"
         case "cancelled": return "Cancelled"
+        case "aborted": return "Aborted"
         case "refused": return "Refused"
         case "error": return "Error"
         case "running": return "Running"
@@ -89,15 +105,57 @@ enum OutcomeText {
         }
     }
 
-    /// A finished operation without a receipt, named from its exit code.
+    /// What an outcome means, shown when hovering its badge.
+    static func help(_ outcome: String) -> String? {
+        switch outcome {
+        case "failed": return "The job ran and its checks failed."
+        case "timed-out": return "The job ran past its time limit."
+        case "cancelled": return "Cancelled before it finished."
+        case "aborted": return "Source changed before the job started, so nothing ran."
+        case "refused": return "No worker accepted the job, so nothing ran."
+        case "error": return "The Fleet couldn't run, verify or clean up this job."
+        default: return nil
+        }
+    }
+
+    /// An operation's outcome: the service's once it reports one, otherwise
+    /// named from the exit code, as older services left it.
+    static func outcome(running: Bool, reported: String?, exitCode: Int?) -> String {
+        running ? "running" : (reported ?? outcome(forExitCode: exitCode))
+    }
+
+    /// The same mapping as the service's `outcomeForExitCode`, for a finished
+    /// operation the service hasn't named.
     static func outcome(forExitCode code: Int?) -> String {
         switch code {
         case 0: return "passed"
-        case 1, 8: return "failed"
+        case 1: return "failed"
         case 6: return "timed-out"
         case 7: return "cancelled"
         case 3, 4: return "refused"
         default: return "error"
         }
+    }
+
+    /// A worker's recent job, named by its receipt when this Mac has one,
+    /// otherwise as the service names the worker's reason. The worker's record
+    /// alone can't tell a source-change abort from a failed upload, so anything
+    /// it can't name stays an error.
+    static func outcome(of job: RemoteJob, recorded: String?) -> String {
+        if let recorded { return recorded }
+        switch job.reason {
+        case "completed": return ["0", "-", ""].contains(job.exitCode) ? "passed" : "failed"
+        case "timeout": return "timed-out"
+        case "cancelled", "disconnected": return "cancelled"
+        default: return "error"
+        }
+    }
+
+    /// The line under a finished operation: its exit code's meaning, or the
+    /// outcome's own when the code alone would mislead, such as exit 2 for a
+    /// source-change abort.
+    static func meaning(of outcome: String, exitCode: Int?) -> String? {
+        guard let exitCode else { return nil }
+        return outcome == Self.outcome(forExitCode: exitCode) ? ExitMeaning.title(exitCode) : help(outcome)
     }
 }

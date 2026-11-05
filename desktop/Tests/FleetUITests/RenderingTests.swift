@@ -86,6 +86,10 @@ final class RenderingTests: XCTestCase {
         let store = try await loadedStore()
         _ = render(OperationStrip(store: store, operation: UIFixture.operation("aaaaaaaaaaaaaaaaaaaaaaaa")), width: 640, scheme: .light)
         _ = render(OperationStrip(store: store, operation: UIFixture.operation("cccccccccccccccccccccccc", status: "complete", exitCode: 4, finishedAt: "2026-11-01T22:07:00.000Z", machine: nil)), width: 420, scheme: .dark)
+        _ = render(OperationStrip(store: store, operation: UIFixture.operation("dddddddddddddddddddddddd", status: "complete", exitCode: 2, outcome: "aborted", finishedAt: "2026-11-01T22:07:00.000Z")), width: 640, scheme: .light)
+        for outcome in ["running", "passed", "failed", "timed-out", "cancelled", "aborted", "refused", "error"] {
+            _ = render(OutcomeBadge(outcome: outcome), width: 140, scheme: .dark)
+        }
         if let run = store.runs?.runs.first { _ = render(RunStrip(store: store, run: run), width: 640, scheme: .dark) }
         _ = render(OverviewView(store: store), width: 1100, scheme: .light)
         _ = render(NoWorkersView(store: store), width: 620, scheme: .dark)
@@ -108,6 +112,9 @@ final class RenderingTests: XCTestCase {
                 OperationStrip(store: store, operation: UIFixture.operation("aaaaaaaaaaaaaaaaaaaaaaaa"))
                 if let run = store.runs?.runs.first { RunStrip(store: store, run: run) }
                 OperationStrip(store: store, operation: UIFixture.operation("cccccccccccccccccccccccc", status: "complete", exitCode: 4, finishedAt: "2026-11-01T22:07:00.000Z", machine: nil))
+                OperationStrip(store: store, operation: UIFixture.operation("dddddddddddddddddddddddd", status: "complete", exitCode: 1, outcome: "failed", finishedAt: "2026-11-01T22:07:00.000Z"))
+                OperationStrip(store: store, operation: UIFixture.operation("eeeeeeeeeeeeeeeeeeeeeeee", status: "complete", exitCode: 2, outcome: "aborted", finishedAt: "2026-11-01T22:07:00.000Z"))
+                OperationStrip(store: store, operation: UIFixture.operation("ffffffffffffffffffffffff", status: "complete", exitCode: 5, outcome: "error", finishedAt: "2026-11-01T22:07:00.000Z"))
             }
             .frame(width: 760)
         }

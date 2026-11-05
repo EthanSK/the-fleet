@@ -3,7 +3,7 @@
 import { FleetError, usageError } from '../errors.ts';
 import { loadMachines, loadProject, resolveSourceRoot, selectMachine } from '../registry.ts';
 import { describeLock, formatDuration } from '../run/preflight.ts';
-import { listReceipts, readReceipt } from '../run/receipt.ts';
+import { classifyRun, listReceipts, readReceipt } from '../run/receipt.ts';
 import { fetchStatus, runControl } from '../run/remoteChecks.ts';
 import { runProfile } from '../run/runJob.ts';
 import { expectPositionals, parseArgs, single } from './args.ts';
@@ -167,7 +167,8 @@ export function resultsCommand(context: CliContext, argv: readonly string[]): nu
       print(context, JSON.stringify(receipt, null, 2));
       return 0;
     }
-    print(context, `${receipt.jobId}  ${receipt.outcome}`);
+    // Text shows the canonical outcome, as apps do; --json keeps the recorded receipt.
+    print(context, `${receipt.jobId}  ${classifyRun(receipt).outcome}`);
     print(context, `  ${receipt.summary}`);
     print(context, `  Project   ${receipt.project}/${receipt.profile} on ${receipt.machine.id}`);
     print(context, `  Source    ${receipt.source.digest.slice(0, 16)} · ${receipt.source.files} files${receipt.source.git?.head ? ` · from ${receipt.source.git.head.slice(0, 12)}` : ''}`);
@@ -191,6 +192,6 @@ export function resultsCommand(context: CliContext, argv: readonly string[]): nu
     print(context, 'No runs yet.');
     return 0;
   }
-  for (const receipt of receipts) print(context, `${receipt.jobId}  ${receipt.outcome.padEnd(9)}  ${receipt.summary}`);
+  for (const receipt of receipts) print(context, `${receipt.jobId}  ${classifyRun(receipt).outcome.padEnd(9)}  ${receipt.summary}`);
   return 0;
 }

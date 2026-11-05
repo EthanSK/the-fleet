@@ -11,7 +11,7 @@ import { resolveStatePaths, type StatePaths } from '../../src/paths.ts';
 import { loadMachines } from '../../src/registry.ts';
 import { defaultMachineNames } from '../../src/run/orderedMachines.ts';
 import type { PreflightReport } from '../../src/run/preflight.ts';
-import type { Receipt } from '../../src/run/receipt.ts';
+import type { Receipt, RunAbort } from '../../src/run/receipt.ts';
 import type { RunRequest, RunResult } from '../../src/run/runJob.ts';
 import { loadAgentBridgeRoute } from '../../src/transport/agentBridgeConfig.ts';
 import { LocalShellTransport } from './localShellTransport.ts';
@@ -52,7 +52,7 @@ export function rawCall(paths: StatePaths, method: string, path: string, value?:
 }
 
 /** Writes a finished run folder the way runProfile does, and returns its result. */
-export function writeRun(runsDirectory: string, jobId: string, options: { outcome?: Receipt['outcome']; project?: string; profile?: string; machine?: string; stdout?: string; finishedAt?: string; resources?: Receipt['resources']; placement?: Receipt['placement'] } = {}): RunResult {
+export function writeRun(runsDirectory: string, jobId: string, options: { outcome?: Receipt['outcome']; abort?: RunAbort; project?: string; profile?: string; machine?: string; stdout?: string; finishedAt?: string; resources?: Receipt['resources']; placement?: Receipt['placement'] } = {}): RunResult {
   const directory = join(runsDirectory, jobId);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, '.fleet-run'), '');
@@ -62,9 +62,10 @@ export function writeRun(runsDirectory: string, jobId: string, options: { outcom
   const finishedAt = options.finishedAt ?? new Date().toISOString();
   const receipt: Receipt = {
     schemaVersion: 1, jobId, project: options.project ?? 'example', profile: options.profile ?? 'test', profileKind: 'test', outcome,
+    abort: options.abort ?? null,
     ...(options.resources === undefined ? {} : { resources: options.resources }),
     ...(options.placement === undefined ? {} : { placement: options.placement }),
-    cliExitCode: { passed: 0, failed: 1, refused: 4, error: 5, 'timed-out': 6, cancelled: 7 }[outcome], summary: `${outcome === 'passed' ? 'Passed' : 'Failed'} on ${options.machine ?? 'mini'}: 3 tests, exit 0`,
+    cliExitCode: { passed: 0, failed: 1, aborted: 2, refused: 4, error: 5, 'timed-out': 6, cancelled: 7 }[outcome], summary: `${outcome === 'passed' ? 'Passed' : 'Failed'} on ${options.machine ?? 'mini'}: 3 tests, exit 0`,
     machine: { id: options.machine ?? 'mini', transport: 'test', fingerprint: 'fp-mini' },
     source: { root: '/tmp/source', digest: 'a'.repeat(64), files: 3, symlinks: 0, bytes: 30, git: null, manifest: 'source-manifest.tsv' },
     command: { argv: ['npm', 'test'], extraArgs: [], prepare: [], cwd: '.', envNames: [], timeoutSeconds: 60, script: 'command.sh' },

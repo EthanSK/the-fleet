@@ -9,10 +9,22 @@ import type { SnapshotEntry } from './select.ts';
 
 type FileEntry = Extract<SnapshotEntry, { kind: 'file' }>;
 
-/** Extraction of the existing tar.ts error; keep its public re-export there. */
+/** Ends the summary of a source-change stop, after the changed path. Receipts
+ * written before the typed `abort` field are recognised by this exact text,
+ * so keep it stable (see classifyRun in run/receipt.ts). */
+export const SOURCE_CHANGED_SUMMARY_SUFFIX = ' changed after planning. Run again once edits settle.';
+
+/** Extraction of the existing tar.ts error; keep its public re-export there.
+ * A protective stop, not a Fleet failure: the run aborts before the job starts
+ * rather than test a snapshot that no longer matches its plan. */
 export class SourceChangedError extends FleetError {
+  /** Selected path, relative to the source root, that no longer matches the plan. */
+  readonly relativePath: string;
+
   constructor(relativePath: string) {
-    super('usage', `${relativePath} changed after planning. Run again once edits settle.`);
+    // Exit code 2 (usage) predates the 'aborted' outcome; kept for scripts.
+    super('usage', `${relativePath}${SOURCE_CHANGED_SUMMARY_SUFFIX}`);
+    this.relativePath = relativePath;
   }
 }
 

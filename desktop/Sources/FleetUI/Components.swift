@@ -104,7 +104,7 @@ struct OutcomeBadge: View {
     let outcome: String
 
     var body: some View {
-        HStack(spacing: 6) {
+        let badge = HStack(spacing: 6) {
             StatusLamp(color: FleetPalette.color(forOutcome: outcome), size: 8, pulsing: outcome == "running")
             Text(OutcomeText.title(outcome).uppercased())
                 .font(.eyebrow)
@@ -114,6 +114,7 @@ struct OutcomeBadge: View {
         .fixedSize()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(OutcomeText.title(outcome))
+        if let help = OutcomeText.help(outcome) { badge.help(help) } else { badge }
     }
 }
 

@@ -196,6 +196,24 @@ not yet predict each workload's resource cost. The 500-entry controller index
 keeps these small summaries, job duration and source digest after the full receipt folder is pruned. Automatic
 receipts include `placement` values explaining the chosen worker.
 
+## Run outcomes
+
+Each receipt records one outcome. `passed`, `failed` and `timed-out` are the
+job's own result; failing tests are a valid result. `cancelled`, `aborted` and
+`refused` give no result: the run was cancelled, its source changed before the
+job started (`abort.path` names the file and nothing ran), or no worker accepted
+it. `error` means The Fleet itself failed: a connection or upload, output
+verification, or cleanup it couldn't confirm. A source change with unconfirmed
+cleanup stays an `error`. The desktop app shows results green or amber, no
+result grey and errors red.
+
+Exit codes are unchanged: an abort still exits 2 and output verification 8.
+Receipts written before `aborted` existed recorded a source-change stop as
+`error` and output verification as `failed`. Run history and `results` show
+these as `aborted` (only with confirmed cleanup and no job start) and `error`.
+The receipt files keep what they recorded. Finished operations report the same
+`outcome`, so clients needn't infer it from the exit code.
+
 ## Shared controller setup
 
 Register a project's recipe once with `the-fleet register` to enable it. Apps can
@@ -342,7 +360,7 @@ HTTP runs over `~/.the-fleet/service.sock` (mode 0600), not an open TCP port.
 | GET /v1/projects | Registered projects and profiles from their live manifests |
 | POST /v1/projects/ID/plan | `{profile, machine?}` what a run would send; contacts no worker |
 | POST /v1/projects/ID/run | `{profile, machine? \| machines?, owner?, detached?}` runs a saved profile |
-| GET /v1/operations | Retained operations with label, owner, worker and job IDs |
+| GET /v1/operations | Retained operations with label, owner, worker, job IDs and, once finished, `outcome` |
 | GET /v1/runs?limit=N&project=P | Finished runs from receipts, across run stores |
 | GET /v1/runs/JOB?tail=BYTES | One receipt with bounded stdout/stderr tails |
 

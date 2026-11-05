@@ -328,6 +328,10 @@ public struct OperationSummary: Codable, Sendable, Equatable, Identifiable {
     public let jobIds: [String]
     public let machineId: String?
     public let lastLine: String?
+    /// The service's outcome once complete, from the run's receipt when there
+    /// is one (see `RunSummary.outcome`). Nil while running and from older
+    /// services, which leave the app to name it from the exit code.
+    public let outcome: String?
 
     public var isRunning: Bool { status == "running" }
     /// Profile runs and one-time requests; other CLI commands are not work.
@@ -353,6 +357,8 @@ public struct OperationOutput: Codable, Sendable, Equatable {
     public let cancelRequested: Bool?
     public let jobIds: [String]?
     public let machineId: String?
+    /// As `OperationSummary.outcome`.
+    public let outcome: String?
     public let output: String
     public let nextOffset: Int
     public let truncated: Bool
@@ -376,7 +382,10 @@ public struct RunSummary: Codable, Sendable, Equatable, Identifiable {
     public let project: String
     public let profile: String
     public let profileKind: String?
-    /// "passed", "failed", "timed-out", "cancelled", "refused" or "error".
+    /// "passed", "failed", "timed-out", "cancelled", "aborted", "refused" or
+    /// "error", classified by the service. Older receipts that recorded a
+    /// source-change stop as "error" arrive here as "aborted"; the receipt
+    /// itself keeps what it recorded.
     public let outcome: String
     public let summary: String
     public let machineId: String?

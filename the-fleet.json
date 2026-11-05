@@ -39,7 +39,7 @@
       "success": {
         "minTestCount": {
           "pattern": "(?:#|\u2139) tests (\\d+)",
-          "min": 235
+          "min": 242
         }
       }
     },
@@ -95,7 +95,7 @@
       "success": {
         "minTestCount": {
           "pattern": "Executed (\\d+) tests?",
-          "min": 74
+          "min": 80
         }
       }
     },

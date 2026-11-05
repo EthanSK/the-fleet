@@ -155,6 +155,17 @@ final class ClientContractTests: XCTestCase {
         XCTAssertFalse(stub.last?.body?.contains("machine") ?? true, "the coordinator picks the worker")
     }
 
+    func testOperationsCarryTheServicesOutcomeAndOlderServicesOmitIt() async throws {
+        let stub = StubTransport()
+        let finished = #""owner":"The Fleet app","kind":"run","label":"example/test","project":"example","profile":"test","status":"complete","createdAt":"2026-11-05T15:11:00.000Z","finishedAt":"2026-11-05T15:12:40.000Z","detached":true,"cancelRequested":false,"jobIds":[],"machineId":"mini","lastLine":null"#
+        stub.reply("/v1/operations", #"{"operations":[{"id":"0123456789abcdef01234567",\#(finished),"exitCode":2,"outcome":"aborted"},{"id":"89abcdef0123456789abcdef",\#(finished),"exitCode":2},{"id":"456789abcdef0123456789ab","owner":"cli","kind":"run","label":"example/test","project":"example","profile":"test","status":"running","exitCode":null,"outcome":null,"createdAt":"2026-11-05T15:13:00.000Z","finishedAt":null,"detached":false,"cancelRequested":false,"jobIds":[],"machineId":null,"lastLine":null}]}"#)
+        let operations = try await LiveFleetClient(transport: stub).operations()
+        XCTAssertEqual(operations.map(\.outcome), ["aborted", nil, nil], "older services and running work have no outcome")
+        stub.reply("/v1/operations/", #"{"id":"0123456789abcdef01234567","owner":"cli","status":"complete","exitCode":2,"outcome":"aborted","output":"x","nextOffset":1,"truncated":false}"#)
+        let output = try await LiveFleetClient(transport: stub).operation(id: "0123456789abcdef01234567", offset: 0)
+        XCTAssertEqual(output.outcome, "aborted")
+    }
+
     func testWatchingAnOperationNeverActsAsItsHeartbeat() async throws {
         let stub = StubTransport()
         stub.reply("/v1/operations/", #"{"id":"0123456789abcdef01234567","owner":"cli","status":"running","output":"x","nextOffset":5,"truncated":false}"#)

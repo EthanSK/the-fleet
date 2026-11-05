@@ -253,8 +253,9 @@ struct WorkerDetailView: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(jobs) { job in
-                        let row = RecentJobRow(job: job, now: store.now)
-                        if store.run(forJob: job.jobId) != nil {
+                        let run = store.run(forJob: job.jobId)
+                        let row = RecentJobRow(job: job, outcome: OutcomeText.outcome(of: job, recorded: run?.outcome), now: store.now)
+                        if run != nil {
                             NavigationLink(value: FleetRoute.run(job.jobId)) { row }.buttonStyle(.plain)
                         } else {
                             row
@@ -327,12 +328,12 @@ struct WorkerDetailView: View {
 
 struct RecentJobRow: View {
     let job: RemoteJob
+    let outcome: String
     let now: Date
 
     var body: some View {
-        let failed = job.reason != "completed" || (job.exitCode != "0" && job.exitCode != "-" && !job.exitCode.isEmpty)
         HStack(spacing: 10) {
-            Circle().fill(failed ? FleetPalette.stop : FleetPalette.cleared).frame(width: 6, height: 6)
+            Circle().fill(FleetPalette.color(forOutcome: outcome)).frame(width: 6, height: 6)
             VStack(alignment: .leading, spacing: 1) {
                 Text(job.label.isEmpty ? job.jobId : job.label).font(.data(12, weight: .medium)).lineLimit(1)
                 Text(reasonText).font(.caption).foregroundStyle(.secondary)

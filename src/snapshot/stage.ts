@@ -8,6 +8,7 @@ import { createWriteStream, promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { FleetError } from '../errors.ts';
 import { SourceChangedError, tarStream } from './tar.ts';
 import { openSnapshotFile, snapshotFileChunks } from './readFile.ts';
 import type { SnapshotEntry, SnapshotPlan } from './select.ts';
@@ -33,7 +34,10 @@ export async function stageSnapshot(plan: SnapshotPlan, directory: string, cance
   try {
     await assertSnapshotUnchanged(plan);
     for (const entry of plan.entries) {
-      if (cancelled()) throw new SourceChangedError(entry.relativePath);
+      // A cancellation is not a source change. This previously threw
+      // SourceChangedError, which could record a cancelled run as a protective
+      // source-change stop; reuse syncSource's own cancellation error instead.
+      if (cancelled()) throw new FleetError('transport', 'Source transfer cancelled.');
       const destination = join(directory, entry.relativePath);
       await fs.mkdir(dirname(destination), { recursive: true, mode: 0o700 });
       if (entry.kind === 'symlink') {

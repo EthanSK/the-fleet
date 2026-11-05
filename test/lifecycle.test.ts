@@ -14,6 +14,7 @@ import { JobSession } from '../src/run/jobSession.ts';
 import { recoverArtifacts } from '../src/run/recoverArtifacts.ts';
 import { execFileSync } from 'node:child_process';
 import { shellQuote } from '../src/transport/shellQuote.ts';
+import type { RemoteProcess } from '../src/transport/transport.ts';
 import { testEnvironment, testMachine, writeFiles, waitUntil } from './helpers/fixtures.ts';
 
 function setup(command: string, extra: Record<string, unknown> = {}) {
@@ -179,6 +180,62 @@ test('lost cleanup confirmation cannot produce a passed receipt', { timeout: 300
     const run = await runProfile({ ...request, transport });
     assert.equal(run.receipt.outcome, 'error');
     assert.notEqual(run.exitCode, 0);
+  } finally { env.cleanup(); }
+});
+
+/** Edits the source once the tar upload session starts; the stream reads files lazily after that. */
+function editDuringUpload(source: string, start: (command: string) => RemoteProcess): (command: string) => RemoteProcess {
+  const uploadPrefix = uploadCommand('/fixture').replace(/ [^ ]+$/, ' ');
+  return (command) => {
+    if (command.startsWith(uploadPrefix)) writeFileSync(join(source, 'run.sh'), 'echo edited; echo tests 1');
+    return start(command);
+  };
+}
+
+test('a source change during tar upload aborts before the job without an error', { timeout: 30000 }, async () => {
+  const { env, request } = setup('echo COMMAND_STARTED; echo tests 1');
+  const transport = { description: env.transport.description, isConnectionFailure: () => false,
+    start: editDuringUpload(request.sourceRoot, (command) => env.transport.start(command)) };
+  try {
+    const run = await runProfile({ ...request, transport });
+    assert.equal(run.receipt.outcome, 'aborted', JSON.stringify(run.receipt));
+    assert.deepEqual(run.receipt.abort, { reason: 'source-changed', path: 'run.sh' });
+    assert.equal(run.exitCode, 2, 'exit code unchanged from when this was recorded as error');
+    assert.equal(run.receipt.summary, 'run.sh changed after planning. Run again once edits settle.');
+    assert.equal(run.receipt.timing.remoteStartedAt, null);
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(run.receipt.remote.processesRemaining, false);
+    assert.equal(env.stdout.text.includes('COMMAND_STARTED'), false);
+  } finally { env.cleanup(); }
+});
+
+test('a source change with unconfirmed cleanup stays an error', { timeout: 30000 }, async () => {
+  const { env, request } = setup('echo tests 1');
+  const transport = { description: env.transport.description, isConnectionFailure: () => false,
+    start: editDuringUpload(request.sourceRoot, (command) => {
+      const remote = env.transport.start(command);
+      if (!command.includes('fleet-runner-supervisor')) return remote;
+      // Drop only the lock-release confirmation.
+      let pending = '';
+      const filtered = new Transform({ transform(chunk, _encoding, done) {
+        pending += chunk.toString();
+        for (;;) {
+          const newline = pending.indexOf('\n');
+          if (newline < 0) break;
+          const line = pending.slice(0, newline + 1);
+          pending = pending.slice(newline + 1);
+          if (!line.startsWith('@@FR RELEASED')) this.push(line);
+        }
+        done();
+      }});
+      remote.stdout.pipe(filtered);
+      return { ...remote, stdout: filtered };
+    }) };
+  try {
+    const run = await runProfile({ ...request, transport });
+    assert.equal(run.receipt.outcome, 'error', JSON.stringify(run.receipt));
+    assert.equal(run.receipt.abort, null);
+    assert.match(run.receipt.summary, /changed after planning\. Run again once edits settle\. Lock release not confirmed/);
   } finally { env.cleanup(); }
 });
 
@@ -396,6 +453,7 @@ test('verification failure retains the only remote archive until verified recove
     const run = await runProfile({ ...request, transport });
     const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
     assert.equal(run.exitCode, 8, JSON.stringify(run.receipt));
+    assert.equal(run.receipt.outcome, 'error', 'a hash mismatch is a verification error, never a job result');
     assert.equal(existsSync(join(directory, 'artifacts.pending')), true);
     assert.equal(existsSync(join(directory, 'artifacts.tar')), true);
     assert.equal(existsSync(join(directory, 'src')), false);

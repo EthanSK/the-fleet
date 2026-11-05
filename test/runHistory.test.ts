@@ -206,6 +206,37 @@ test('history covers every run store a coordinated run used and reports removed 
   } finally { await f.close(); }
 });
 
+test('operations report the outcome their receipt decided, not a guess from the exit code', async () => {
+  let crash = false;
+  const f = await startServiceFixture({ execute: async (request) => {
+    if (crash) throw new Error('Unexpected fixture failure');
+    return writeRun(request.paths.runsDir, request.jobId ?? '20261105-aborted-fixture', { outcome: 'aborted', abort: { reason: 'source-changed', path: 'package.json' } });
+  } });
+  const finished = async (started: Promise<{ body: Record<string, unknown> }>): Promise<Record<string, unknown>> => {
+    const id = String((await started).body['operationId']);
+    await until(async () => (await f.call('GET', `/v1/operations/${id}`)).body['status'] === 'complete');
+    return (await f.call('GET', `/v1/operations/${id}`)).body;
+  };
+  try {
+    registerExample(f); await addWorker(f);
+    const aborted = await finished(f.call('POST', '/v1/projects/example/run', { profile: 'test', machine: 'mini' }));
+    assert.equal(aborted['exitCode'], 2, 'exit code unchanged from when source-change stops were errors');
+    assert.equal(aborted['outcome'], 'aborted');
+    const listed = ((await f.call('GET', '/v1/operations')).body['operations'] as Record<string, unknown>[]).find((operation) => operation['id'] === aborted['id']);
+    assert.equal(listed?.['outcome'], 'aborted');
+
+    // The same exit code without a receipt is an invalid request: an error.
+    const invalid = await finished(f.call('POST', '/v1/command', { owner: 'cli', cwd: f.root, argv: ['run', 'example', 'missing'] }));
+    assert.equal(invalid['exitCode'], 2);
+    assert.equal(invalid['outcome'], 'error');
+
+    crash = true;
+    const crashed = await finished(f.call('POST', '/v1/projects/example/run', { profile: 'test', machine: 'mini' }));
+    assert.equal(crashed['exitCode'], 1, 'exit code kept for compatibility');
+    assert.equal(crashed['outcome'], 'error', 'an unexpected exception is not a failed job');
+  } finally { await f.close(); }
+});
+
 test('resource measurements survive pruning without retaining the full job folder', async () => {
   const f = await startServiceFixture();
   const resources = { sampleCount: 3, sampleIntervalSeconds: 5 as const, peakRssKiB: 32768, peakProcessCpuPercent: 185.2 };

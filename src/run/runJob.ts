@@ -38,7 +38,7 @@ import { firstLines, type Transport } from '../transport/transport.ts';
 import { renderCommandScript } from './commandScript.ts';
 import { JobSession, TimeoutWaitingError } from './jobSession.ts';
 import { evaluatePreflight, formatDuration, type PreflightReport } from './preflight.ts';
-import { createRunDirectory, pruneAbandonedSourceStages, pruneRuns, writeReceipt, type Receipt, type RunOutcomeKind } from './receipt.ts';
+import { createRunDirectory, pruneAbandonedSourceStages, pruneRuns, writeReceipt, type Receipt, type RunAbort, type RunOutcomeKind } from './receipt.ts';
 import { fetchPreflight } from './remoteChecks.ts';
 import { evaluateSuccess, type SuccessEvaluation } from './success.ts';
 import { syncSource, type RsyncStatistics } from './rsyncTransfer.ts';
@@ -416,7 +416,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     output,
     missingArtifacts: state.missingArtifacts,
   });
-  const { outcome, cliExitCode, summary } = decideOutcome({ machine, profile, success, state });
+  const { outcome, cliExitCode, summary, abort } = decideOutcome({ machine, profile, success, state });
   const finishedAt = new Date();
   const receipt: Receipt = {
     schemaVersion: 1,
@@ -425,6 +425,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     profile: profile.name,
     profileKind: profile.kind,
     outcome,
+    abort,
     cliExitCode,
     summary,
     machine: {
@@ -516,36 +517,47 @@ function decideOutcome(input: {
   profile: Profile;
   success: SuccessEvaluation;
   state: { reason: string | null; exitCode: number | null; failure: FleetError | null; artifactError: FleetError | null; lockReleased: boolean; stuck: boolean; remoteStartedEpoch: number | null; remoteEndedEpoch: number | null };
-}): { outcome: RunOutcomeKind; cliExitCode: number; summary: string } {
+}): { outcome: RunOutcomeKind; cliExitCode: number; summary: string; abort: RunAbort | null } {
   const { machine, profile, success, state } = input;
   const elapsed = state.remoteStartedEpoch !== null && state.remoteEndedEpoch !== null ? ` (${formatDuration(state.remoteEndedEpoch - state.remoteStartedEpoch)})` : '';
+  // Legacy history relies on this: any unconfirmed cleanup appends a note to
+  // the summary (see classifyRun's legacySourceChange in receipt.ts).
   const lockNote = state.stuck ? ' Lock kept: job processes are still running.' : state.lockReleased ? '' : ' Lock release not confirmed; check: fleet-runner status';
   if (state.failure) {
-    return { outcome: state.failure.kind === 'machineBusy' ? 'refused' : 'error', cliExitCode: state.failure.exitCode, summary: `${state.failure.message}${lockNote}` };
+    // A source change is a protective stop, not a Fleet failure, but only
+    // once the supervisor confirms the job never started and cleanup finished.
+    // Otherwise it stays an error, with its lock note. Exit 2 is unchanged.
+    if (state.failure instanceof SourceChangedError && state.reason === 'aborted' && state.remoteStartedEpoch === null && state.exitCode === null && state.lockReleased && !state.stuck) {
+      return { outcome: 'aborted', cliExitCode: state.failure.exitCode, summary: state.failure.message, abort: { reason: 'source-changed', path: state.failure.relativePath } };
+    }
+    return { outcome: state.failure.kind === 'machineBusy' ? 'refused' : 'error', cliExitCode: state.failure.exitCode, summary: `${state.failure.message}${lockNote}`, abort: null };
   }
   if (!state.lockReleased || state.stuck) {
-    return { outcome: 'error', cliExitCode: EXIT_CODES.transport, summary: `Cleanup on ${machine.id} is not confirmed.${lockNote}` };
+    return { outcome: 'error', cliExitCode: EXIT_CODES.transport, summary: `Cleanup on ${machine.id} is not confirmed.${lockNote}`, abort: null };
   }
   switch (state.reason) {
     case 'timeout':
-      return { outcome: 'timed-out', cliExitCode: EXIT_CODES.timedOut, summary: `Timed out on ${machine.id} after ${profile.timeoutMinutes}m. Job stopped.${lockNote}` };
+      return { outcome: 'timed-out', cliExitCode: EXIT_CODES.timedOut, summary: `Timed out on ${machine.id} after ${profile.timeoutMinutes}m. Job stopped.${lockNote}`, abort: null };
     case 'cancelled':
     case 'disconnected':
-      return { outcome: 'cancelled', cliExitCode: EXIT_CODES.cancelled, summary: `Cancelled on ${machine.id}. Job stopped.${lockNote}` };
+      return { outcome: 'cancelled', cliExitCode: EXIT_CODES.cancelled, summary: `Cancelled on ${machine.id}. Job stopped.${lockNote}`, abort: null };
     case 'completed':
       break;
     default:
-      return { outcome: 'error', cliExitCode: EXIT_CODES.transport, summary: `Job on ${machine.id} ended without running (${state.reason ?? 'no result'}).${lockNote}` };
+      return { outcome: 'error', cliExitCode: EXIT_CODES.transport, summary: `Job on ${machine.id} ended without running (${state.reason ?? 'no result'}).${lockNote}`, abort: null };
   }
+  // Returned outputs that fail hash/path verification are a Fleet verification
+  // error, never a job result, even when the job's own checks also failed.
+  // Earlier versions recorded this as `failed`; the exit code stays 8.
   if (state.artifactError) {
-    return { outcome: 'failed', cliExitCode: EXIT_CODES.artifactVerification, summary: `Artifacts from ${machine.id} failed verification.${lockNote}` };
+    return { outcome: 'error', cliExitCode: EXIT_CODES.artifactVerification, summary: `Artifacts from ${machine.id} failed verification.${lockNote}`, abort: null };
   }
   const tests = success.testCount === null ? '' : `${success.testCount} test${success.testCount === 1 ? '' : 's'}, `;
   if (success.passed) {
-    return { outcome: 'passed', cliExitCode: EXIT_CODES.ok, summary: `Passed on ${machine.id}: ${tests}exit 0${elapsed}${lockNote}` };
+    return { outcome: 'passed', cliExitCode: EXIT_CODES.ok, summary: `Passed on ${machine.id}: ${tests}exit 0${elapsed}${lockNote}`, abort: null };
   }
   const reason = state.exitCode !== 0 ? `exit ${state.exitCode ?? 'unknown'}` : `exit 0 but ${success.checks.find((check) => !check.passed)?.detail ?? 'a success check failed'}`;
-  return { outcome: 'failed', cliExitCode: EXIT_CODES.jobFailed, summary: `Failed on ${machine.id}: ${tests}${reason}${elapsed}${lockNote}` };
+  return { outcome: 'failed', cliExitCode: EXIT_CODES.jobFailed, summary: `Failed on ${machine.id}: ${tests}${reason}${elapsed}${lockNote}`, abort: null };
 }
 
 async function upload(transport: Transport, remoteJobDirectory: string, members: TarMember[]): Promise<void> {

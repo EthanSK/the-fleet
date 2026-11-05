@@ -70,7 +70,7 @@ struct OperationStrip: View {
     let operation: OperationSummary
 
     var body: some View {
-        let outcome = operation.isRunning ? "running" : OutcomeText.outcome(forExitCode: operation.exitCode)
+        let outcome = OutcomeText.outcome(running: operation.isRunning, reported: operation.outcome, exitCode: operation.exitCode)
         let started = FleetDate.parse(operation.createdAt)
         let ended = FleetDate.parse(operation.finishedAt)
         StripLayout(tint: FleetPalette.color(forOutcome: outcome)) {
@@ -101,7 +101,7 @@ struct OperationStrip: View {
             let line = operation.cancelRequested ? "Cancelling" : (operation.lastLine ?? (operation.machineId == nil ? "Choosing a worker" : "Starting"))
             return "\(operation.owner) · \(line)"
         }
-        let meaning = operation.exitCode.map(ExitMeaning.title) ?? "Ended"
+        let meaning = OutcomeText.meaning(of: outcome, exitCode: operation.exitCode) ?? "Ended"
         return "\(operation.owner) · \(operation.lastLine ?? meaning)"
     }
 }
@@ -174,7 +174,7 @@ struct OperationDetailView: View {
         let running = feed.latest.map { $0.status == "running" } ?? summary?.isRunning ?? false
         let label = feed.latest?.label ?? summary?.label ?? "Operation"
         let exitCode = feed.latest?.exitCode ?? summary?.exitCode
-        let outcome = running ? "running" : OutcomeText.outcome(forExitCode: exitCode)
+        let outcome = OutcomeText.outcome(running: running, reported: feed.latest?.outcome ?? summary?.outcome, exitCode: exitCode)
         let jobIDs = feed.latest?.jobIds ?? summary?.jobIds ?? []
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
@@ -196,8 +196,8 @@ struct OperationDetailView: View {
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                if !running, let exitCode {
-                    Text(ExitMeaning.title(exitCode)).font(.callout.weight(.medium))
+                if !running, let meaning = OutcomeText.meaning(of: outcome, exitCode: exitCode) {
+                    Text(meaning).font(.callout.weight(.medium))
                 }
                 if running, (feed.latest?.detached ?? summary?.detached) == true {
                     Text("Keeps running if you quit The Fleet.").font(.caption).foregroundStyle(.secondary)

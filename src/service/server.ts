@@ -13,6 +13,7 @@ import { main, defaultContext } from '../cli/main.ts';
 import { loadMachines, loadProject, type LoadedProject } from '../registry.ts';
 import { resolveRunPaths, ensurePrivateDir, expandHome, type StatePaths } from '../paths.ts';
 import { getProfile, Interrupts, type RunRequest, type RunResult } from '../run/runJob.ts';
+import { classifyRun, outcomeForExitCode, type RunOutcomeKind } from '../run/receipt.ts';
 import { defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../run/orderedMachines.ts';
 import { parseManifest } from '../schema/manifest.ts';
 import type { Machine } from '../schema/machines.ts';
@@ -48,6 +49,10 @@ interface Operation {
   jobIds: string[];
   status: 'running' | 'complete';
   exitCode?: number;
+  /** Canonical outcome once complete, so apps needn't guess from the exit code. */
+  outcome?: RunOutcomeKind;
+  /** The latest receipt this operation produced; it decides the outcome when its exit code is the operation's. */
+  latestRun?: { readonly exitCode: number; readonly outcome: RunOutcomeKind };
   output: string;
   offset: number;
   lastSeen: number;
@@ -164,6 +169,13 @@ function lastLine(output: string): string | null {
   return line === undefined ? null : line.slice(0, 300);
 }
 
+/** An operation's canonical outcome. Its latest receipt decides only when the
+ * operation ended with that run's own exit code: ordered selection can record
+ * a refused run and then end for another reason. Otherwise the exit code does. */
+function operationOutcome(exitCode: number, latestRun: Operation['latestRun']): RunOutcomeKind {
+  return latestRun !== undefined && latestRun.exitCode === exitCode ? latestRun.outcome : outcomeForExitCode(exitCode);
+}
+
 function failure(error: unknown): { status: number; value: Record<string, unknown> } {
   if (error instanceof ApiError) return { status: error.status, value: { error: error.message, code: error.code, ...error.extra } };
   const busy = error instanceof FleetError && error.kind === 'machineBusy';
@@ -199,7 +211,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
     return {
       id: operation.id, owner: operation.owner, kind: operation.kind, label: operation.label,
       project: operation.project ?? null, profile: operation.profile ?? null,
-      status: operation.status, exitCode: operation.exitCode ?? null,
+      status: operation.status, exitCode: operation.exitCode ?? null, outcome: operation.outcome ?? null,
       createdAt: new Date(operation.createdAt).toISOString(),
       finishedAt: operation.finishedAt === undefined ? null : new Date(operation.finishedAt).toISOString(),
       detached: operation.detached, cancelRequested: operation.cancelRequested, jobIds: operation.jobIds,
@@ -220,9 +232,15 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       }
       next();
     } });
-    const completion = execute(operation, output).then((exitCode) => { operation.exitCode = exitCode; }).catch((error: unknown) => {
+    const completion = execute(operation, output).then((exitCode) => {
+      operation.exitCode = exitCode;
+      operation.outcome = operationOutcome(exitCode, operation.latestRun);
+    }).catch((error: unknown) => {
       output.write(`${error instanceof Error ? error.message : 'Operation failed'}\n`);
       operation.exitCode = error instanceof FleetError ? error.exitCode : 1;
+      // Exit 1 is kept for compatibility, but an unexpected exception is a
+      // Fleet error, not a failed job.
+      operation.outcome = error instanceof FleetError ? operationOutcome(error.exitCode, operation.latestRun) : 'error';
     }).finally(() => {
       operation.status = 'complete';
       operation.finishedAt = Date.now();
@@ -242,6 +260,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       const result = await coordinator.runOne(operation.owner, operation.id, run);
       if (result) {
         operation.jobIds.push(result.receipt.jobId);
+        operation.latestRun = { exitCode: result.exitCode, outcome: classifyRun(result.receipt).outcome };
         try { recordRun(paths, result, { operationId: operation.id, owner: operation.owner }); }
         catch { /* History pointers are best effort; the receipt stays authoritative. */ }
       }

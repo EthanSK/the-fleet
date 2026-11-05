@@ -96,7 +96,10 @@ test('editing the original during rsync aborts before command execution', { time
   fixture.transport.beforeSync = () => writeFileSync(join(fixture.source, 'data/file.txt'), 'edited-after-plan');
   try {
     const run = await runProfile(fixture.request);
-    assert.notEqual(run.receipt.outcome, 'passed');
+    // A protective stop, not a Fleet error; its exit code is unchanged.
+    assert.equal(run.receipt.outcome, 'aborted', JSON.stringify(run.receipt));
+    assert.deepEqual(run.receipt.abort, { reason: 'source-changed', path: 'data/file.txt' });
+    assert.equal(run.exitCode, 2);
     assert.equal(run.admission, 'admitted');
     assert.equal(run.receipt.timing.remoteStartedAt, null);
     assert.equal(fixture.env.stdout.text.includes('COMMAND_STARTED'), false);
@@ -112,7 +115,8 @@ test('atomic editor replacement after staging aborts a successfully synced old s
   };
   try {
     const run = await runProfile(fixture.request);
-    assert.notEqual(run.receipt.outcome, 'passed');
+    assert.equal(run.receipt.outcome, 'aborted', JSON.stringify(run.receipt));
+    assert.deepEqual(run.receipt.abort, { reason: 'source-changed', path: 'data/file.txt' });
     assert.equal(run.receipt.timing.remoteStartedAt, null);
     assert.equal(run.receipt.remote.lockReleased, true);
     assert.equal(readFileSync(join(fixture.tree, 'data/file.txt'), 'utf8'), 'first');
@@ -130,7 +134,9 @@ test('corruption after rsync is refused before materialization or command start'
   };
   try {
     const run = await runProfile(fixture.request);
-    assert.notEqual(run.receipt.outcome, 'passed');
+    // Remote verification failure is a genuine error, not a source-change stop.
+    assert.equal(run.receipt.outcome, 'error', JSON.stringify(run.receipt));
+    assert.equal(run.receipt.abort, null);
     assert.equal(run.receipt.timing.remoteStartedAt, null);
     assert.equal(run.receipt.remote.lockReleased, true);
     assert.equal(existsSync(fixture.tree), false);

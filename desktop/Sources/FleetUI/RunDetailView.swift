@@ -73,9 +73,12 @@ struct RunDetailView: View {
                 }
 
                 if let receipt = detail.receipt {
-                    facts(receipt)
-                    checks(receipt)
-                    if !receipt.artifacts.isEmpty || !receipt.missingArtifacts.isEmpty { outputs(receipt) }
+                    // Unmet checks and outputs take the run's colour: amber when its tests
+                    // failed, grey when it never ran, red only for The Fleet's own errors.
+                    let unmet = FleetPalette.color(forOutcome: run.outcome)
+                    facts(receipt, outcome: run.outcome)
+                    checks(receipt, unmet: unmet)
+                    if !receipt.artifacts.isEmpty || !receipt.missingArtifacts.isEmpty { outputs(receipt, unmet: unmet) }
                     if !receipt.remote.notes.isEmpty {
                         SectionCard(title: "Notes") {
                             ForEach(receipt.remote.notes, id: \.self) { NoticeLine(text: $0, symbol: "info.circle", tint: FleetPalette.idle) }
@@ -96,9 +99,13 @@ struct RunDetailView: View {
         }
     }
 
-    private func facts(_ receipt: Receipt) -> some View {
+    private func facts(_ receipt: Receipt, outcome: String) -> some View {
         SectionCard(title: "Run") {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
+                // Only older receipts are read differently from how they were written.
+                if receipt.outcome != outcome {
+                    FactRow(label: "Recorded as", value: "\(OutcomeText.title(receipt.outcome)), by an earlier version of The Fleet")
+                }
                 FactRow(label: "Source", value: FleetFormat.path(receipt.source.root), monospaced: true)
                 FactRow(label: "Sent", value: "\(FleetFormat.plural(receipt.source.files, "file"))\(receipt.source.symlinks > 0 ? " and \(FleetFormat.plural(receipt.source.symlinks, "link"))" : ""), \(FleetFormat.disk(receipt.source.bytes))")
                 FactRow(label: "Digest", value: String(receipt.source.digest.prefix(16)), monospaced: true)
@@ -122,13 +129,13 @@ struct RunDetailView: View {
         }
     }
 
-    private func checks(_ receipt: Receipt) -> some View {
+    private func checks(_ receipt: Receipt, unmet: Color) -> some View {
         SectionCard(title: "Checks") {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(receipt.success.checks, id: \.self) { check in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Image(systemName: check.passed ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(check.passed ? FleetPalette.cleared : FleetPalette.stop)
+                            .foregroundStyle(check.passed ? FleetPalette.cleared : unmet)
                         Text(check.name).font(.callout.weight(.medium))
                         Text(check.detail).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                     }
@@ -141,7 +148,7 @@ struct RunDetailView: View {
         }
     }
 
-    private func outputs(_ receipt: Receipt) -> some View {
+    private func outputs(_ receipt: Receipt, unmet: Color) -> some View {
         SectionCard(title: "Outputs") {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(receipt.artifacts.prefix(200), id: \.self) { artifact in
@@ -157,7 +164,7 @@ struct RunDetailView: View {
                     Text("\(receipt.artifacts.count - 200) more in the receipt").font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(receipt.missingArtifacts, id: \.self) { missing in
-                    NoticeLine(text: "\(missing) wasn't returned", symbol: "xmark.seal.fill", tint: FleetPalette.stop)
+                    NoticeLine(text: "\(missing) wasn't returned", symbol: "xmark.seal.fill", tint: unmet)
                 }
             }
         }

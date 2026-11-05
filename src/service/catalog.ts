@@ -13,7 +13,7 @@ import { describeSuccess } from '../cli/projectCommands.ts';
 import { usageError } from '../errors.ts';
 import { currentRunsDirectory, ensurePrivateDir, type StatePaths } from '../paths.ts';
 import { listRegistrations, loadMachines, loadProject, type LoadedProject } from '../registry.ts';
-import { listReceipts, type Receipt } from '../run/receipt.ts';
+import { classifyRun, isRunAbort, listReceipts, type Receipt, type RunAbort } from '../run/receipt.ts';
 import { getProfile, makeJobId, planRun, type RunResult } from '../run/runJob.ts';
 import { findMachine } from '../schema/machines.ts';
 import type { Profile } from '../schema/manifest.ts';
@@ -109,6 +109,8 @@ export interface RunIndexEntry {
   readonly project: string;
   readonly profile: string;
   readonly outcome: string;
+  /** As in Receipt: always written now; absent from entries older than 'aborted'. */
+  readonly abort?: RunAbort | null;
   readonly summary: string;
   readonly machineId: string;
   readonly finishedAt: string;
@@ -120,6 +122,7 @@ function isIndexEntry(value: unknown): value is RunIndexEntry {
   if (!value || typeof value !== 'object') return false;
   const entry = value as Record<string, unknown>;
   if (!['jobId', 'receiptPath', 'project', 'profile', 'outcome', 'summary', 'machineId', 'finishedAt'].every((key) => typeof entry[key] === 'string')) return false;
+  if (entry['abort'] !== undefined && entry['abort'] !== null && !isRunAbort(entry['abort'])) return false;
   const jobId = entry['jobId'] as string, receiptPath = entry['receiptPath'] as string;
   return JOB_ID.test(jobId) && isAbsolute(receiptPath) && basename(receiptPath) === 'receipt.json' && basename(dirname(receiptPath)) === jobId;
 }
@@ -143,7 +146,7 @@ export function recordRun(paths: StatePaths, result: RunResult, context: { reado
   const { receipt } = result;
   const entry: RunIndexEntry = {
     jobId: receipt.jobId, receiptPath: result.receiptPath, project: receipt.project, profile: receipt.profile,
-    outcome: receipt.outcome, summary: receipt.summary, machineId: receipt.machine.id, finishedAt: receipt.timing.finishedAt,
+    outcome: receipt.outcome, abort: receipt.abort ?? null, summary: receipt.summary, machineId: receipt.machine.id, finishedAt: receipt.timing.finishedAt,
     operationId: context.operationId, owner: context.owner,
     jobSeconds: receipt.timing.jobSeconds, sourceDigest: receipt.source.digest,
     ...(receipt.resources === undefined ? {} : { resources: receipt.resources }),
@@ -169,13 +172,17 @@ function readReceiptFile(path: string): Receipt | undefined {
   }
 }
 
+// `outcome` here is the canonical classification, so every client shows old and
+// new history alike; the raw receipt in runDetailView keeps what was recorded.
 function summary(receipt: Receipt, directory: string, entry?: RunIndexEntry): Record<string, unknown> {
+  const classified = classifyRun(receipt);
   return {
     jobId: receipt.jobId,
     project: receipt.project,
     profile: receipt.profile,
     profileKind: receipt.profileKind ?? null,
-    outcome: receipt.outcome,
+    outcome: classified.outcome,
+    abort: classified.abort ?? null,
     summary: receipt.summary,
     machineId: receipt.machine?.id ?? entry?.machineId ?? null,
     requestedAt: receipt.timing?.requestedAt ?? null,
@@ -197,8 +204,9 @@ function summary(receipt: Receipt, directory: string, entry?: RunIndexEntry): Re
 }
 
 function unavailable(entry: RunIndexEntry): Record<string, unknown> {
+  const classified = classifyRun(entry, { prunedIndex: true });
   return {
-    jobId: entry.jobId, project: entry.project, profile: entry.profile, profileKind: null, outcome: entry.outcome, summary: entry.summary,
+    jobId: entry.jobId, project: entry.project, profile: entry.profile, profileKind: null, outcome: classified.outcome, abort: classified.abort ?? null, summary: entry.summary,
     machineId: entry.machineId, requestedAt: null, finishedAt: entry.finishedAt, jobSeconds: entry.jobSeconds ?? null, totalSeconds: null, testCount: null,
     passed: null, artifacts: null, missingArtifacts: null, owner: entry.owner ?? null, operationId: entry.operationId ?? null,
     resources: entry.resources ?? null, placement: entry.placement ?? null,
