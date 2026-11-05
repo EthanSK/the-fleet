@@ -72,6 +72,9 @@ fi
 SUPERVISOR_START=$(fr_proc_start $$)
 LOCKED_AT=$(date +%s)
 JOB_PGID=''
+RESOURCE_SAMPLES=0
+RESOURCE_PEAK_RSS_KIB=0
+RESOURCE_PEAK_CPU_PERCENT=0
 
 fr_write_owner() {
   _tmp="$LOCK/owner.tmp.$$"
@@ -161,6 +164,19 @@ fr_wait_pid_bounded() {
   return 0
 }
 
+# Sample only this owned process group. Reuse the supervisor's existing polling
+# loop: no extra sleep, idle daemon, command arguments or per-sample log files.
+# ps CPU percentages are process-lifetime averages, not instantaneous CPU time;
+# summed RSS includes shared pages. These are bounded estimates, not accounting.
+fr_sample_resources() {
+  [ -n "$JOB_PGID" ] || return 0
+  _resource_sample=$(LC_ALL=C ps -axo pgid=,rss=,pcpu= 2>/dev/null | LC_ALL=C awk -v pgid="$JOB_PGID" -v samples="$RESOURCE_SAMPLES" -v peak_rss="$RESOURCE_PEAK_RSS_KIB" -v peak_cpu="$RESOURCE_PEAK_CPU_PERCENT" '
+    $1 == pgid { found=1; rss += $2; cpu += $3 }
+    END { if (found) samples++; if (rss > peak_rss) peak_rss=rss; if (cpu > peak_cpu) peak_cpu=cpu; printf "%d %.0f %.2f", samples, peak_rss, peak_cpu }')
+  [ -n "$_resource_sample" ] && read -r RESOURCE_SAMPLES RESOURCE_PEAK_RSS_KIB RESOURCE_PEAK_CPU_PERCENT <<< "$_resource_sample"
+  return 0
+}
+
 fr_write_result() {
   {
     printf 'job_id=%s\n' "$JOB_ID"
@@ -171,6 +187,9 @@ fr_write_result() {
     printf 'ended=%s\n' "$JOB_ENDED"
     printf 'stragglers=%s\n' "$STRAGGLERS"
     printf 'stuck=%s\n' "$STUCK"
+    printf 'resource_samples=%s\n' "$RESOURCE_SAMPLES"
+    printf 'peak_rss_kib=%s\n' "$RESOURCE_PEAK_RSS_KIB"
+    printf 'peak_process_cpu_percent=%s\n' "$RESOURCE_PEAK_CPU_PERCENT"
   } > "$JOB_DIR/result"
 }
 
@@ -267,7 +286,7 @@ fr_finish() {
     fr_proto 'FINALIZER-FAILED'
   fi
   fr_write_result
-  fr_proto "RESULT reason=$REASON exit_code=$EXIT_CODE started=$JOB_STARTED ended=$JOB_ENDED stragglers=$STRAGGLERS stuck=$STUCK"
+  fr_proto "RESULT reason=$REASON exit_code=$EXIT_CODE started=$JOB_STARTED ended=$JOB_ENDED stragglers=$STRAGGLERS stuck=$STUCK resource_samples=$RESOURCE_SAMPLES peak_rss_kib=$RESOURCE_PEAK_RSS_KIB peak_process_cpu_percent=$RESOURCE_PEAK_CPU_PERCENT"
   if [ -n "$JOB_STARTED" ] && [ "$STUCK" = 0 ] && [ "$FINALIZER_FAILED" = 0 ]; then
     fr_send_artifacts
   fi
@@ -389,7 +408,10 @@ set +m
 fr_write_owner
 
 _deadline=$((JOB_STARTED + TIMEOUT_S))
+_resource_tick=0
 while kill -0 "$JOB_PGID" 2>/dev/null; do
+  if [ "$((_resource_tick % 10))" = 0 ]; then fr_sample_resources; fi
+  _resource_tick=$((_resource_tick + 1))
   while fr_ctl_next; do
     case "$CTL_LINE" in
       CANCEL|ABORT) REASON=cancelled ;;
@@ -402,6 +424,7 @@ while kill -0 "$JOB_PGID" 2>/dev/null; do
   [ "$REASON" = completed ] || break
   sleep 0.5
 done
+fr_sample_resources
 
 if [ "$REASON" != completed ]; then
   fr_stop_group "$JOB_PGID"

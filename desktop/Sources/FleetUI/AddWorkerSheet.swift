@@ -105,7 +105,7 @@ struct AddWorkerSheet: View {
                     if let problem = nameProblem { Text(problem).font(.caption).foregroundStyle(FleetPalette.stop) }
                     TextField("Description", text: $details, prompt: Text("Optional, such as Desk Mac mini"))
                     Toggle("Default worker", isOn: $makeDefault)
-                        .help("Runs that don't name a worker try the default first.")
+                        .help("Preferred when worker load and available resources are equal.")
                 } footer: {
                     Text("Commands use this name, as in the-fleet run project test --machine \(name.isEmpty ? "name" : name).")
                         .font(.caption).foregroundStyle(.secondary)

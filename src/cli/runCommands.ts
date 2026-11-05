@@ -10,7 +10,7 @@ import { expectPositionals, parseArgs, single } from './args.ts';
 import { print, status, type CliContext } from './context.ts';
 import { printPlan } from './projectCommands.ts';
 import { recoverArtifacts } from '../run/recoverArtifacts.ts';
-import { orderedMachines, runOnOrderedMachines } from '../run/orderedMachines.ts';
+import { defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../run/orderedMachines.ts';
 import { reportDiskSpaceProblem } from '../run/diskSpace.ts';
 
 export async function recoverCommand(context: CliContext, argv: readonly string[]): Promise<number> {
@@ -48,8 +48,11 @@ export async function runCommand(context: CliContext, argv: readonly string[]): 
       ...(context.onDiskSpaceProblem ? { onDiskSpaceProblem: context.onDiskSpaceProblem } : {}) },
     interrupts: context.interrupts,
   };
-  if (workerNames !== undefined) {
-    const result = await runOnOrderedMachines({ ...common, machines: orderedMachines(loadMachines(context.paths), workerNames.split(',')), transportFor: context.transportFor,
+  const automatic = workerNames === undefined && single(args, 'machine') === undefined && project.manifest.defaultMachine === undefined;
+  if (workerNames !== undefined || automatic) {
+    const registry = loadMachines(context.paths);
+    const result = await runOnOrderedMachines({ ...common, automatic, machines: orderedMachines(registry, workerNames?.split(',') ?? defaultMachineNames(registry)), transportFor: context.transportFor,
+      ...(context.selectionUsage ? { selectionUsage: context.selectionUsage } : {}),
       ...(context.runOne ? { runOne: context.runOne } : {}), ...(context.beforePreflight ? { beforePreflight: context.beforePreflight } : {}) });
     return result.exitCode;
   }

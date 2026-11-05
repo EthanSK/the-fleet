@@ -5,7 +5,8 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadProject, registerProject } from '../src/registry.ts';
-import { defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../src/run/orderedMachines.ts';
+import { compareWorkerLoad, defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../src/run/orderedMachines.ts';
+import { report } from './helpers/serviceFixture.ts';
 import { fetchPreflight } from '../src/run/remoteChecks.ts';
 import { Interrupts } from '../src/run/runJob.ts';
 import type { Machine } from '../src/schema/machines.ts';
@@ -34,6 +35,17 @@ function setup(command = 'echo tests 1', requires: Record<string, unknown> = {})
     }, io: { stdout: first.stdout, stderr: first.stderr, status: (_line: string) => {} } };
   return { request, machines, transports, cleanup: () => { first.cleanup(); second.cleanup(); } };
 }
+
+test('automatic ranking uses pressure, load per CPU, reservations and memory before preference', () => {
+  const machine = testMachine();
+  const base = { machine, used: 0, report: report('normal', { memPressureLevel: 1, cpuCount: 10, loadAverage: [1], memAvailableBytes: 4 * 1024 ** 3 }) };
+  assert.ok(compareWorkerLoad(base, { ...base, report: { ...base.report, memPressureLevel: 2, loadAverage: [0] } }) < 0);
+  assert.ok(compareWorkerLoad(base, { ...base, report: { ...base.report, cpuCount: 2 } }) < 0);
+  assert.ok(compareWorkerLoad(base, { ...base, used: 1 }) < 0);
+  assert.ok(compareWorkerLoad(base, { ...base, report: { ...base.report, memAvailableBytes: 1024 ** 3 } }) < 0);
+  assert.equal(compareWorkerLoad(base, base), 0);
+  assert.ok(compareWorkerLoad(base, { ...base, report: report('unknown') }) < 0);
+});
 
 test('explicit worker order preserves names and rejects repeated physical aliases', () => {
   const first = testMachine();

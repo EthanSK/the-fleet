@@ -9,6 +9,7 @@ import type { Machine } from '../schema/machines.ts';
 import type { Transport } from '../transport/transport.ts';
 import type { RunRequest, RunResult } from '../run/runJob.ts';
 import type { DiskSpaceProblemHandler } from '../run/diskSpace.ts';
+import type { OrderedRunRequest } from '../run/orderedMachines.ts';
 
 export interface CliContext {
   readonly paths: StatePaths;
@@ -19,6 +20,7 @@ export interface CliContext {
   /** The Fleet coordinator adds one shared admission gate across local clients. */
   readonly runOne?: (request: RunRequest) => Promise<RunResult | null>;
   readonly beforePreflight?: (machine: Machine) => Promise<void>;
+  readonly selectionUsage?: OrderedRunRequest['selectionUsage'];
   readonly onDiskSpaceProblem?: DiskSpaceProblemHandler;
 }
 

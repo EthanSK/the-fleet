@@ -12,6 +12,8 @@ export class AdmissionTransport extends LocalShellTransport {
   onBusy: (() => void) | undefined;
   fingerprint: string;
   diskFreeKiB: number | undefined;
+  readonly preflightValues: Record<string, string> = { cpu_count: '10', load_average: '1 1 1',
+    mem_available_bytes: '8589934592', mem_pressure_level: '1' };
   constructor(home: string) {
     super(home);
     this.fingerprint = createHash('sha256').update(home).digest('hex').slice(0, 16);
@@ -31,11 +33,13 @@ export class AdmissionTransport extends LocalShellTransport {
     let output = '';
     const fingerprint = this.fingerprint;
     const diskFreeKiB = this.diskFreeKiB;
+    const values = this.preflightValues;
     const stdout = process.stdout.pipe(new Transform({
       transform(chunk: Buffer, _encoding, callback) { output += chunk.toString('utf8'); callback(); },
       flush(callback) {
         output = output.replace(/^fingerprint=.*$/m, `fingerprint=${fingerprint}`);
         if (diskFreeKiB !== undefined) output = output.replace(/^disk_free_kb=.*$/m, `disk_free_kb=${diskFreeKiB}`);
+        for (const [key, value] of Object.entries(values)) output = output.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=${value}`);
         this.push(output); callback();
       },
     }));

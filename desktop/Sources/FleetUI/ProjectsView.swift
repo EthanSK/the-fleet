@@ -46,7 +46,7 @@ struct ProjectCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(project.id).font(.nameplate(16))
                 Spacer()
-                Text(project.defaultMachine.map { "Runs on \($0)" } ?? "First available worker")
+                Text(project.defaultMachine.map { "Runs on \($0)" } ?? "Automatic worker selection")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let description = project.description { Text(description).foregroundStyle(.secondary) }
@@ -159,7 +159,7 @@ struct RunProfileSheet: View {
             Form {
                 Section {
                     Picker("Worker", selection: $worker) {
-                        Text(project?.defaultMachine.map { "Project worker (\($0))" } ?? "First available").tag(String?.none)
+                        Text(project?.defaultMachine.map { "Project worker (\($0))" } ?? "Automatic").tag(String?.none)
                         Divider()
                         ForEach(store.workers) { item in
                             Text("\(item.id) — \(item.status.condition.title)").tag(Optional(item.id))
@@ -193,7 +193,7 @@ struct RunProfileSheet: View {
     private var placementNote: String {
         if worker != nil { return "Runs only on this worker. If it's busy, nothing starts." }
         if let pinned = project?.defaultMachine { return "\(projectID) names \(pinned) as its worker." }
-        return "Tries workers in order, default first. A run that started never moves to another worker."
+        return "Chooses a worker by load and available memory. A run that started stays on its worker."
     }
 
     @ViewBuilder private var planContent: some View {

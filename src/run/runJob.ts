@@ -73,6 +73,7 @@ export class Interrupts {
 }
 
 export interface RunRequest {
+  readonly placement?: Receipt['placement'];
   /** Preallocated by the coordinator so crash recovery retains job identity. */
   readonly jobId?: string;
   readonly paths: StatePaths;
@@ -231,6 +232,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     missingArtifacts: [] as string[],
     artifactError: null as FleetError | null,
     failure: null as FleetError | null,
+    resources: undefined as Receipt['resources'],
   };
 
   const command = supervisorCommand(machine, { jobId, nonce, timeoutSeconds: profile.timeoutMinutes * 60, label, profile });
@@ -458,6 +460,8 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
       jobSeconds: state.remoteStartedEpoch !== null && state.remoteEndedEpoch !== null ? state.remoteEndedEpoch - state.remoteStartedEpoch : null,
       totalSeconds: Math.round((finishedAt.getTime() - requestedAt.getTime()) / 1000),
     },
+    ...(request.placement === undefined ? {} : { placement: request.placement }),
+    ...(state.resources === undefined ? {} : { resources: state.resources }),
     remote: {
       admission,
       reason: state.reason,
@@ -489,6 +493,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
 function applyRemoteResult(rest: string, state: {
   reason: string | null; exitCode: number | null; remoteStartedEpoch: number | null;
   remoteEndedEpoch: number | null; stragglers: boolean; stuck: boolean;
+  resources?: Receipt['resources'];
 }): void {
   const fields = parseFields(rest);
   state.reason = fields.get('reason') ?? null;
@@ -498,6 +503,12 @@ function applyRemoteResult(rest: string, state: {
   state.remoteEndedEpoch = Number(fields.get('ended')) || null;
   state.stragglers = fields.get('stragglers') === '1';
   state.stuck = fields.get('stuck') === '1';
+  const sampleCount = Number(fields.get('resource_samples'));
+  const peakRssKiB = Number(fields.get('peak_rss_kib'));
+  const peakProcessCpuPercent = Number(fields.get('peak_process_cpu_percent'));
+  if (Number.isInteger(sampleCount) && sampleCount > 0 && Number.isFinite(peakRssKiB) && peakRssKiB >= 0 && Number.isFinite(peakProcessCpuPercent) && peakProcessCpuPercent >= 0) {
+    state.resources = { sampleCount, sampleIntervalSeconds: 5, peakRssKiB, peakProcessCpuPercent };
+  }
 }
 
 function decideOutcome(input: {

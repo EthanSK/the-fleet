@@ -9,6 +9,7 @@ import { Coordinator, type CoordinatorDependencies } from '../../src/service/coo
 import { startApi, serviceSocket } from '../../src/service/server.ts';
 import { resolveStatePaths, type StatePaths } from '../../src/paths.ts';
 import { loadMachines } from '../../src/registry.ts';
+import { defaultMachineNames } from '../../src/run/orderedMachines.ts';
 import type { PreflightReport } from '../../src/run/preflight.ts';
 import type { Receipt } from '../../src/run/receipt.ts';
 import type { RunRequest, RunResult } from '../../src/run/runJob.ts';
@@ -51,7 +52,7 @@ export function rawCall(paths: StatePaths, method: string, path: string, value?:
 }
 
 /** Writes a finished run folder the way runProfile does, and returns its result. */
-export function writeRun(runsDirectory: string, jobId: string, options: { outcome?: Receipt['outcome']; project?: string; profile?: string; machine?: string; stdout?: string; finishedAt?: string } = {}): RunResult {
+export function writeRun(runsDirectory: string, jobId: string, options: { outcome?: Receipt['outcome']; project?: string; profile?: string; machine?: string; stdout?: string; finishedAt?: string; resources?: Receipt['resources']; placement?: Receipt['placement'] } = {}): RunResult {
   const directory = join(runsDirectory, jobId);
   mkdirSync(directory, { recursive: true });
   writeFileSync(join(directory, '.fleet-run'), '');
@@ -61,6 +62,8 @@ export function writeRun(runsDirectory: string, jobId: string, options: { outcom
   const finishedAt = options.finishedAt ?? new Date().toISOString();
   const receipt: Receipt = {
     schemaVersion: 1, jobId, project: options.project ?? 'example', profile: options.profile ?? 'test', profileKind: 'test', outcome,
+    ...(options.resources === undefined ? {} : { resources: options.resources }),
+    ...(options.placement === undefined ? {} : { placement: options.placement }),
     cliExitCode: { passed: 0, failed: 1, refused: 4, error: 5, 'timed-out': 6, cancelled: 7 }[outcome], summary: `${outcome === 'passed' ? 'Passed' : 'Failed'} on ${options.machine ?? 'mini'}: 3 tests, exit 0`,
     machine: { id: options.machine ?? 'mini', transport: 'test', fingerprint: 'fp-mini' },
     source: { root: '/tmp/source', digest: 'a'.repeat(64), files: 3, symlinks: 0, bytes: 30, git: null, manifest: 'source-manifest.tsv' },
@@ -104,6 +107,7 @@ export async function startServiceFixture(options: {
   const executed: RunRequest[] = [];
   const dependencies: CoordinatorDependencies = {
     machines: () => loadMachines(paths).machines,
+    preferredMachine: () => defaultMachineNames(loadMachines(paths))[0],
     localFingerprint: async () => options.localFingerprint ?? 'fp-local',
     now: Date.now,
     inspect: async (machine) => {

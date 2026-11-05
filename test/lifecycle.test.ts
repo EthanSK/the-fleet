@@ -47,6 +47,21 @@ test('real supervisor returns verified artifacts, stderr and cleanup', { timeout
   } finally { env.cleanup(); }
 });
 
+test('real supervisor returns bounded process-group resource measurements without retaining source', { timeout: 30000 }, async () => {
+  const { env, request } = setup('python3 -c "import time; data=bytearray(32*1024*1024); time.sleep(6)"; echo tests 1');
+  try {
+    const run = await runProfile(request);
+    assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.ok(run.receipt.resources);
+    assert.ok(run.receipt.resources.sampleCount > 0);
+    assert.ok(run.receipt.resources.peakRssKiB >= 32 * 1024);
+    assert.ok(run.receipt.resources.peakProcessCpuPercent >= 0);
+    assert.equal(run.receipt.resources.sampleIntervalSeconds, 5);
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(existsSync(join(env.remoteRoot, 'jobs', run.receipt.jobId, 'src')), false);
+  } finally { env.cleanup(); }
+});
+
 for (const [name, command] of [['nonzero', 'echo tests 2; exit 7'], ['zero tests', 'echo tests 0']] as const) {
   test(`real supervisor rejects ${name}`, { timeout: 30000 }, async () => {
     const { env, request } = setup(command);

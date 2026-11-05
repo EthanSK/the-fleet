@@ -69,7 +69,7 @@ public enum JSONValue: Encodable, Equatable, Sendable {
 
 /// Where a profile run may go. The coordinator decides the actual worker.
 public enum RunPlacement: Equatable, Sendable {
-    /// Registered workers in order, default first (or the project's own worker).
+    /// Automatic load-aware choice (or the project's own worker). Keeps the existing case name for client compatibility.
     case firstAvailable
     case worker(String)
 }

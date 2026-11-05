@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { registerProject } from '../src/registry.ts';
+import { recordRun } from '../src/service/catalog.ts';
 import type { RunRequest, RunResult } from '../src/run/runJob.ts';
 import { report, startServiceFixture, writeRun, type ServiceFixture } from './helpers/serviceFixture.ts';
 
@@ -202,6 +203,25 @@ test('history covers every run store a coordinated run used and reports removed 
     assert.equal((await f.call('GET', '/v1/runs/..%2F..%2Fetc')).status, 400);
     assert.equal((await f.call('GET', '/v1/runs/20200101-000000-none-test-000000')).status, 404);
     assert.equal((await f.call('GET', '/v1/runs?project=example&limit=1')).body['runs'] instanceof Array, true);
+  } finally { await f.close(); }
+});
+
+test('resource measurements survive pruning without retaining the full job folder', async () => {
+  const f = await startServiceFixture();
+  const resources = { sampleCount: 3, sampleIntervalSeconds: 5 as const, peakRssKiB: 32768, peakProcessCpuPercent: 185.2 };
+  const placement = { strategy: 'load-aware' as const, pressureLevel: 1, loadPerCpu: 0.4, occupiedSlots: 1 };
+  try {
+    const result = writeRun(f.paths.runsDir, '20261105-resource-history-fixture', { resources, placement });
+    recordRun(f.paths, result, { operationId: 'fixture', owner: 'history-test' });
+    const read = async () => ((await f.call('GET', '/v1/runs')).body['runs'] as Record<string, unknown>[])[0];
+    assert.deepEqual((await read())?.['resources'], resources);
+    rmSync(join(f.paths.runsDir, result.receipt.jobId), { recursive: true });
+    const pruned = await read();
+    assert.equal(pruned?.['available'], false);
+    assert.deepEqual(pruned?.['resources'], resources);
+    assert.deepEqual(pruned?.['placement'], placement);
+    assert.equal(pruned?.['jobSeconds'], result.receipt.timing.jobSeconds);
+    assert.equal(pruned?.['sourceDigest'], result.receipt.source.digest);
   } finally { await f.close(); }
 });
 

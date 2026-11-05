@@ -4,8 +4,8 @@
 // exactly as the CLI does. Finished runs come from durable receipts. Clients may
 // choose another run store per request, so the coordinator also keeps a small
 // bounded index of each managed receipt's location; history therefore covers
-// every store it ran into. The index is a pointer list, never a copy of results,
-// and a missing or pruned receipt is reported as unavailable rather than hidden.
+// every store it ran into. The index retains only pointers and bounded summary
+// measurements; a missing or pruned receipt is reported as unavailable.
 
 import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -100,6 +100,10 @@ export async function planView(paths: StatePaths, projectId: string, value: unkn
 }
 
 export interface RunIndexEntry {
+  readonly resources?: Receipt['resources'];
+  readonly placement?: Receipt['placement'];
+  readonly jobSeconds?: Receipt['timing']['jobSeconds'];
+  readonly sourceDigest?: Receipt['source']['digest'];
   readonly jobId: string;
   readonly receiptPath: string;
   readonly project: string;
@@ -141,6 +145,9 @@ export function recordRun(paths: StatePaths, result: RunResult, context: { reado
     jobId: receipt.jobId, receiptPath: result.receiptPath, project: receipt.project, profile: receipt.profile,
     outcome: receipt.outcome, summary: receipt.summary, machineId: receipt.machine.id, finishedAt: receipt.timing.finishedAt,
     operationId: context.operationId, owner: context.owner,
+    jobSeconds: receipt.timing.jobSeconds, sourceDigest: receipt.source.digest,
+    ...(receipt.resources === undefined ? {} : { resources: receipt.resources }),
+    ...(receipt.placement === undefined ? {} : { placement: receipt.placement }),
   };
   if (!isIndexEntry(entry)) return;
   const runs = [entry, ...readIndex(paths).filter((existing) => existing.jobId !== entry.jobId)].slice(0, INDEX_LIMIT);
@@ -181,6 +188,9 @@ function summary(receipt: Receipt, directory: string, entry?: RunIndexEntry): Re
     missingArtifacts: receipt.missingArtifacts?.length ?? 0,
     owner: entry?.owner ?? null,
     operationId: entry?.operationId ?? null,
+    resources: receipt.resources ?? null,
+    placement: receipt.placement ?? null,
+    sourceDigest: receipt.source?.digest ?? null,
     available: true,
     directory,
   };
@@ -189,8 +199,10 @@ function summary(receipt: Receipt, directory: string, entry?: RunIndexEntry): Re
 function unavailable(entry: RunIndexEntry): Record<string, unknown> {
   return {
     jobId: entry.jobId, project: entry.project, profile: entry.profile, profileKind: null, outcome: entry.outcome, summary: entry.summary,
-    machineId: entry.machineId, requestedAt: null, finishedAt: entry.finishedAt, jobSeconds: null, totalSeconds: null, testCount: null,
+    machineId: entry.machineId, requestedAt: null, finishedAt: entry.finishedAt, jobSeconds: entry.jobSeconds ?? null, totalSeconds: null, testCount: null,
     passed: null, artifacts: null, missingArtifacts: null, owner: entry.owner ?? null, operationId: entry.operationId ?? null,
+    resources: entry.resources ?? null, placement: entry.placement ?? null,
+    sourceDigest: entry.sourceDigest ?? null,
     available: false, directory: dirname(entry.receiptPath),
   };
 }

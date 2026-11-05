@@ -39,7 +39,7 @@
       "success": {
         "minTestCount": {
           "pattern": "(?:#|\u2139) tests (\\d+)",
-          "min": 219
+          "min": 235
         }
       }
     },
@@ -108,7 +108,8 @@
         "desktop/Tests/**",
         "desktop/Resources/**",
         "desktop/Scripts/**",
-        "LICENSE"
+        "LICENSE",
+        "LICENSING.md"
       ],
       "argv": [
         "bash",

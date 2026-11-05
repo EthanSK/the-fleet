@@ -25,6 +25,11 @@ const KEEP_LOCAL_RUNS = 50;
 export type RunOutcomeKind = 'passed' | 'failed' | 'timed-out' | 'cancelled' | 'refused' | 'error';
 
 export interface Receipt {
+  /** Sampled owned-process-group estimates; short-lived processes can be missed. */
+  readonly resources?: { readonly sampleCount: number; readonly sampleIntervalSeconds: 5; readonly peakRssKiB: number;
+    readonly peakProcessCpuPercent: number };
+  readonly placement?: { readonly strategy: 'load-aware'; readonly pressureLevel?: number; readonly loadPerCpu?: number;
+    readonly availableMemoryBytes?: number; readonly occupiedSlots: number };
   readonly schemaVersion: 1;
   readonly jobId: string;
   readonly project: string;

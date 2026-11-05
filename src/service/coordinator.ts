@@ -15,7 +15,7 @@ import { SshTransport } from '../transport/sshTransport.ts';
 import { fetchPreflight, fetchStatus, runControl, type RemoteStatus, type ControlResult } from '../run/remoteChecks.ts';
 import { evaluatePreflight, type PreflightReport } from '../run/preflight.ts';
 import { assessMemory } from '../run/memoryAssessment.ts';
-import { localMachineFingerprint } from '../run/orderedMachines.ts';
+import { compareWorkerLoad, defaultMachineNames, localMachineFingerprint } from '../run/orderedMachines.ts';
 import { getProfile, makeJobId, runProfile, type RunRequest, type RunResult } from '../run/runJob.ts';
 import { claimsConflict, parseClaim, profileClaim, type CapacityClaim } from '../run/capacity.ts';
 import { reportDiskSpaceProblem, type DiskSpaceProblemHandler } from '../run/diskSpace.ts';
@@ -45,6 +45,7 @@ export interface Reservation {
 export type PublicReservation = Omit<Reservation, 'tokenHash'>;
 export interface CoordinatorDependencies {
   readonly machines: () => readonly Machine[];
+  readonly preferredMachine?: () => string | undefined;
   readonly inspect: (machine: Machine) => Promise<WorkerObservation>;
   readonly localFingerprint: () => Promise<string>;
   readonly execute: (request: RunRequest) => Promise<RunResult>;
@@ -56,6 +57,7 @@ export interface CoordinatorDependencies {
 export function productionDependencies(paths: StatePaths): CoordinatorDependencies {
   return {
     machines: () => loadMachines(paths).machines,
+    preferredMachine: () => defaultMachineNames(loadMachines(paths))[0],
     inspect: async (machine) => {
       const observedAt = new Date().toISOString();
       try {
@@ -150,6 +152,11 @@ export class Coordinator {
     const held = this.claims(fingerprint);
     const knownJobs = new Set(held.map((lease) => lease.jobId).filter((job) => job !== undefined));
     return held.length + (report?.sharedLocks ?? []).filter((lock) => lock.state !== 'free' && !knownJobs.has(lock.jobId)).length;
+  }
+
+  /** Counts both local leases and unmatched remote owners for live worker ranking. */
+  selectionUsage(machine: Machine, report: PreflightReport): number {
+    return report.fingerprint ? this.capacityUsed(report.fingerprint, report) : this.reservationsFor(machine).length;
   }
 
   private accepts(fingerprint: string, claim: CapacityClaim, machine: Machine, report?: PreflightReport): boolean {
@@ -334,16 +341,36 @@ export class Coordinator {
       const machine = machines.find((m) => m.id === name || m.aliases.includes(name) || m.transport.target === name);
       if (!machine) throw new FleetError('usage', `Unknown worker: ${name}`);
       return machine;
-    }) : machines;
-    for (const machine of selected) {
+    }) : [...machines];
+    if (machineNames === undefined) {
+      const preferred = selected.findIndex(machine => machine.id === this.dependencies.preferredMachine?.());
+      if (preferred > 0) selected.unshift(...selected.splice(preferred, 1));
+    }
+    const prepared = new Map<string, WorkerObservation>();
+    if (machineNames === undefined) await Promise.all(selected.map(async machine => {
       await this.maintain(machine.id, onDiskSpaceProblem);
-      const observation = await this.inspect(machine, true);
+      prepared.set(machine.id, await this.inspect(machine, true));
+    }));
+    while (selected.length) {
+      if (machineNames === undefined) selected.sort((a, b) => {
+        const left = prepared.get(a.id)?.report, right = prepared.get(b.id)?.report;
+        if (!left || !right) return left ? -1 : right ? 1 : 0;
+        return compareWorkerLoad({ machine: a, report: left, used: this.selectionUsage(a, left) },
+          { machine: b, report: right, used: this.selectionUsage(b, right) });
+      });
+      const machine = selected.shift();
+      if (!machine) break;
+      if (machineNames !== undefined) {
+        await this.maintain(machine.id, onDiskSpaceProblem);
+        prepared.set(machine.id, await this.inspect(machine, true));
+      }
+      const observation = prepared.get(machine.id);
       // A settings editor may have changed or removed this worker while the
       // probe waited. No await may separate this check from granting ownership.
       if (!this.destinationIsCurrent(machine)) {
         throw new FleetError('machineBusy', `${machine.id}'s settings changed while it was being checked. Nothing was reserved.`);
       }
-      const report = observation.report;
+      const report = observation?.report;
       if (!report?.fingerprint || report.fingerprint === local) continue;
       if (claim.mode !== 'drain') {
         const decision = evaluatePreflight(report, machine, undefined, { ignoreHeavyProcesses: false, nowEpoch: this.dependencies.now() / 1000 });

@@ -1,4 +1,4 @@
-// Default-first and explicit remote-only worker selection for Fleet runs.
+// Automatic load-aware and explicit remote-only worker selection for Fleet runs.
 // Read-only refusals and a conclusive BUSY response may advance the list.
 // Once admission succeeds or becomes uncertain, the run owns that choice:
 // never replay tests on another machine, even after a transfer/start failure.
@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { FleetError, usageError } from '../errors.ts';
 import { findMachine, type Machine, type MachinesRegistry } from '../schema/machines.ts';
 import type { Transport } from '../transport/transport.ts';
-import { evaluatePreflight } from './preflight.ts';
+import { evaluatePreflight, type PreflightReport } from './preflight.ts';
 import { fetchPreflight } from './remoteChecks.ts';
 import { getProfile, runProfile, type RunRequest, type RunResult } from './runJob.ts';
 import { reportDiskSpaceProblem } from './diskSpace.ts';
@@ -65,6 +65,30 @@ export interface OrderedRunRequest extends Omit<RunRequest, 'machine' | 'transpo
   /** Null means another client holds a coordinator reservation; no job started. */
   readonly runOne?: (request: RunRequest) => Promise<RunResult | null>;
   readonly beforePreflight?: (machine: Machine) => Promise<void>;
+  /** Only unpinned requests opt into ranking; explicit lists retain their order. */
+  readonly automatic?: boolean;
+  /** Read synchronously at selection time, so other clients' new leases count. */
+  readonly selectionUsage?: (machine: Machine, report: PreflightReport) => number;
+}
+
+/** Compare current pressure, proportional load and memory before the saved preference. */
+export function compareWorkerLoad(
+  left: { readonly report: PreflightReport; readonly used: number; readonly machine: Machine },
+  right: typeof left,
+): number {
+  const score = ({ report, used, machine }: typeof left): number[] => [
+    report.memPressureLevel === undefined ? 1 : report.memPressureLevel <= 1 ? 0 : report.memPressureLevel,
+    Math.max(report.cpuCount && report.loadAverage?.[0] !== undefined ? report.loadAverage[0] / report.cpuCount : 1,
+      used / machine.limits.maxConcurrentJobs),
+    -(report.memAvailableBytes ?? 0),
+    -(report.diskFreeBytes ?? 0),
+  ]; // Decision: "healthiest suitable worker first" means a normal-pressure Mini can outrank a busy preferred M1. Stable sorting leaves the controller preference as the final tie-breaker; explicit pins/lists never use this comparison. (Codex task: 01a19457-3fdb-7362-895c-fdb317c3aa4f)
+  const a = score(left), b = score(right);
+  for (let index = 0; index < a.length; index += 1) {
+    const difference = (a[index] ?? 0) - (b[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
 }
 
 export async function runOnOrderedMachines(request: OrderedRunRequest): Promise<RunResult> {
@@ -72,31 +96,35 @@ export async function runOnOrderedMachines(request: OrderedRunRequest): Promise<
   const dispatcher = request.dispatcherFingerprint ?? await localMachineFingerprint();
   const skipped: string[] = [];
   const seenPhysicalMachines = new Set<string>();
-  for (const machine of request.machines) {
-    if (request.interrupts?.requested) throw new FleetError('cancelled', 'Run cancelled before admission.');
-    let transport: Transport;
-    try { transport = request.transportFor(machine); }
-    catch (error) {
-      skipped.push(`${machine.id}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
-    const missingEnv = profile.requires.machineEnv.filter((name) => machine.env[name] === undefined);
-    if (missingEnv.length > 0) {
-      skipped.push(`${machine.id}: missing machine env ${missingEnv.join(', ')}`);
-      continue;
-    }
-    if (profile.sourceTransfer === 'rsync' && !transport.startRsync) {
-      skipped.push(`${machine.id}: transport does not support rsync`);
-      continue;
-    }
-    let report;
+  const remaining = [...request.machines];
+  const prepared = new Map<string, { transport: Transport; report: PreflightReport }>();
+  const prepare = async (machine: Machine): Promise<void> => {
     try {
+      const transport = request.transportFor(machine);
+      const missingEnv = profile.requires.machineEnv.filter((name) => machine.env[name] === undefined);
+      if (missingEnv.length) { skipped.push(`${machine.id}: missing machine env ${missingEnv.join(', ')}`); return; }
+      if (profile.sourceTransfer === 'rsync' && !transport.startRsync) { skipped.push(`${machine.id}: transport does not support rsync`); return; }
       await request.beforePreflight?.(machine);
-      report = await fetchPreflight(transport, machine, profile.pathPrepend, [...profile.requires.tools, ...(profile.sourceTransfer === 'rsync' ? ['rsync'] : [])]);
-    } catch (error) {
-      skipped.push(`${machine.id}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
+      const report = await fetchPreflight(transport, machine, profile.pathPrepend, [...profile.requires.tools, ...(profile.sourceTransfer === 'rsync' ? ['rsync'] : [])]);
+      prepared.set(machine.id, { transport, report });
+    } catch (error) { skipped.push(`${machine.id}: ${error instanceof Error ? error.message : String(error)}`); }
+  };
+  if (request.automatic) await Promise.all(remaining.map(prepare));
+  while (remaining.length > 0) {
+    if (request.interrupts?.requested) throw new FleetError('cancelled', 'Run cancelled before admission.');
+    if (request.automatic) remaining.sort((a, b) => {
+      const left = prepared.get(a.id), right = prepared.get(b.id);
+      if (!left || !right) return left ? -1 : right ? 1 : 0;
+      const used = (machine: Machine, report: PreflightReport): number => request.selectionUsage?.(machine, report)
+        ?? (report.sharedLocks ?? []).filter(lock => lock.state !== 'free').length;
+      return compareWorkerLoad({ machine: a, report: left.report, used: used(a, left.report) }, { machine: b, report: right.report, used: used(b, right.report) });
+    }); // No await between this live reservation-aware ranking and runOne's synchronous lease insertion.
+    const machine = remaining.shift();
+    if (!machine) break;
+    if (!request.automatic) await prepare(machine);
+    const candidate = prepared.get(machine.id);
+    if (!candidate) continue;
+    const { report, transport } = candidate;
     if (!report.fingerprint || report.fingerprint === dispatcher) {
       skipped.push(`${machine.id}: ${report.fingerprint ? 'this is the dispatching computer' : 'physical identity was not confirmed'}`);
       continue;
@@ -118,7 +146,12 @@ export async function runOnOrderedMachines(request: OrderedRunRequest): Promise<
     if (request.interrupts?.requested) throw new FleetError('cancelled', 'Run cancelled before admission.');
     // runProfile returns a typed admission result, not an arbitrary exit-code
     // retry rule. A failed test or an uncertain connection stops this loop.
-    const result = await (request.runOne ?? runProfile)({ ...request, machine, transport, preflightReport: report });
+    const result = await (request.runOne ?? runProfile)({ ...request, machine, transport, preflightReport: report,
+      ...(request.automatic ? { placement: { strategy: 'load-aware' as const,
+        ...(report.memPressureLevel === undefined ? {} : { pressureLevel: report.memPressureLevel }),
+        ...(report.cpuCount && report.loadAverage?.[0] !== undefined ? { loadPerCpu: report.loadAverage[0] / report.cpuCount } : {}),
+        ...(report.memAvailableBytes === undefined ? {} : { availableMemoryBytes: report.memAvailableBytes }), occupiedSlots: request.selectionUsage?.(machine, report)
+          ?? (report.sharedLocks ?? []).filter(lock => lock.state !== 'free').length } } : {}) });
     if (result === null) {
       skipped.push(`${machine.id}: reserved by another client`);
       continue;

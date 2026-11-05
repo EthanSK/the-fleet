@@ -183,7 +183,7 @@ struct WorkerSettingsSheet: View {
             Section("General") {
                 TextField("Description", text: binding(\.description, fallback: ""), prompt: Text("Optional"))
                 Toggle("Default worker", isOn: binding(\.isDefault, fallback: false))
-                    .help("Runs that don't name a worker try the default first.")
+                    .help("Preferred when worker load and available resources are equal.")
                 Picker("Icon", selection: $iconChoice) {
                     Text("Automatic (\(store.automaticDeviceKind(id: workerID).title))").tag("")
                     Divider()

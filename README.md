@@ -157,8 +157,12 @@ the-fleet run example test --source /path/to/another/worktree
 
 One-time requests are not registered. Saved manifests live wherever their owner
 chooses; registrations store a pointer and source root in the private state
-directory. Unpinned runs try registered workers in order, default worker first.
-Saved runs and one-time submit requests share that same ordering rule.
+directory. Unpinned runs compare eligible workers' current memory pressure,
+CPU load per core and occupied job-slot fraction, then available RAM and disk.
+The default worker breaks otherwise equal choices. Saved runs, one-time submit
+requests and automatic external reservations use this same load comparison.
+Fresh coordinator reservations count immediately, before CPU observations catch
+up, so simultaneous clients do not all choose an apparently idle worker.
 A manifest's explicit `defaultMachine` preserves a project-specific worker rule.
 Use `--machine worker` to pin a saved run or one-time submit to one worker.
 Use `--machines first,second` for an ordered list of candidates. Submit rejects
@@ -181,6 +185,16 @@ Use the same request and selected worker when comparing source after a build.
 It reads current on-disk files, so edited inputs change the digest. Worker-specific
 settings belong in private machine `env`; `requires.machineEnv` names settings a
 worker must supply. Machine values override generic profile values.
+
+Each new job also returns a small `resources` summary in its receipt: sampled
+process-group peak RSS, peak summed process CPU percentages and sample count.
+The existing supervisor samples approximately every five seconds while the job
+is running, with no extra waiting or idle monitor. These are estimates: short
+processes can be missed, RSS includes shared pages and ps CPU percentages are
+process-lifetime averages. This starts a bounded measurement history; it does
+not yet predict each workload's resource cost. The 500-entry controller index
+keeps these small summaries after the full receipt folder is pruned. Automatic
+receipts include `placement` values explaining the chosen worker.
 
 ## Shared controller setup
 
@@ -214,8 +228,8 @@ writes instead of quietly filling another disk; settings remain accessible.
 Ordinary managed jobs share a worker, up to private worker setting
 `limits.maxConcurrentJobs` (default 2, range 1–8). These are **job slots**,
 not estimates of a job's future CPU/RAM use. Fresh disk, available memory and
-kernel-pressure checks still apply; CPU load is reported for the caller's
-judgment, so some CPU overcommit is possible. Raw swap is display-only.
+kernel-pressure checks still apply; CPU load informs automatic placement and
+is also reported for the caller's judgment; job slots still cannot predict the cost of a new job, so CPU overcommit remains possible. Raw swap is display-only.
 
 Set a profile's `exclusive: true` for work which needs the worker alone.
 Declare worker-local conflicts in `resources`, for example `["port:4200"]`.

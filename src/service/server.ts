@@ -139,23 +139,15 @@ export function inlineProject(input: Record<string, unknown>, cwd: string): { pr
   return { project: { manifest, entry: { schemaVersion: 1, id, manifestPath: 'one-time request', sourceRoot, registeredAt: new Date().toISOString() } }, sourceRoot, profileName };
 }
 
-function normalizedArguments(argv: string[], cwd: string, paths: StatePaths): string[] {
+function normalizedArguments(argv: string[], cwd: string): string[] {
   const result = [...argv];
   for (let i = 0; i < result.length; i += 1) {
     if ((i === 1 && (result[0] === 'register' || result[0] === 'validate')) || result[i - 1] === '--source') {
       result[i] = resolve(cwd, expandHome(result[i] ?? ''));
     }
   }
-  if (result[0] === 'run' && !result.includes('--machine') && !result.includes('--machines') && !result.includes('--dry-run')) {
-    const project = loadProject(paths, result[1] ?? '');
-    if (project.manifest.defaultMachine === undefined) {
-      const names = defaultMachineNames(loadMachines(paths));
-      if (names.length) {
-        const separator = result.indexOf('--');
-        result.splice(separator < 0 ? result.length : separator, 0, '--machines', names.join(','));
-      }
-    }
-  }
+  // Keep an omitted worker selector omitted: runCommand distinguishes automatic
+  // load-aware placement from an explicitly ordered --machines request.
   return result;
 }
 
@@ -260,6 +252,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
   function startCommand(owner: string, argv: string[], runPaths: StatePaths, meta: OperationMeta): Operation {
     return createOperation(owner, meta, async (op, output) =>
       main(argv, { ...defaultContext(), transportFor, paths: runPaths, stdout: output, stderr: output, interrupts: op.interrupts, runOne: managedRunner(op),
+        selectionUsage: (machine, report) => coordinator.selectionUsage(machine, report),
         onDiskSpaceProblem: op.onDiskSpaceProblem,
         beforePreflight: async (machine) => { await coordinator.maintain(machine.id, op.onDiskSpaceProblem); } }));
   }
@@ -339,7 +332,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       const pinned = input['machine'] === undefined ? [] : ['--machine', text(input['machine'], 'machine', 64)];
       const ordered = input['machines'] === undefined ? [] : ['--machines', strings(input['machines'], 'machines').join(',')];
       const cwd = homedir();
-      const argv = normalizedArguments(['run', projectId, profileName, ...pinned, ...ordered], cwd, paths);
+      const argv = normalizedArguments(['run', projectId, profileName, ...pinned, ...ordered], cwd);
       const operation = startCommand(text(input['owner'] ?? 'local-client', 'owner', 200), argv, resolveRunPaths(paths),
         { kind: 'run', label: `${projectId}/${profileName}`, project: projectId, profile: profileName, detached: flag(input['detached'], 'detached') });
       return json(response, 202, { operationId: operation.id, operation: publicOperation(operation) });
@@ -411,6 +404,8 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
             ? (oneTime.project.manifest.defaultMachine === undefined ? defaultMachineNames(registry) : [oneTime.project.manifest.defaultMachine])
             : strings(input['machines'], 'machines');
           const result = await runOnOrderedMachines({ ...oneTime, paths: runPaths, machines: orderedMachines(registry, names), transportFor,
+            automatic: input['machines'] === undefined && oneTime.project.manifest.defaultMachine === undefined,
+            selectionUsage: (machine, report) => coordinator.selectionUsage(machine, report),
             extraArgs: [], ignoreHeavyProcesses: false, interrupts: op.interrupts, runOne: managedRunner(op),
             beforePreflight: async (machine) => { await coordinator.maintain(machine.id, op.onDiskSpaceProblem); },
             io: { stdout: output, stderr: output, status: (line) => { output.write(`fleet-runner: ${line}\n`); }, onDiskSpaceProblem: op.onDiskSpaceProblem } });
@@ -418,7 +413,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
         });
         return json(response, 202, { operationId: operation.id });
       }
-      const argv = normalizedArguments(strings(input['argv'], 'argv'), cwd, paths);
+      const argv = normalizedArguments(strings(input['argv'], 'argv'), cwd);
       const runPaths = ['run', 'recover'].includes(argv[0] ?? '') ? resolveRunPaths(paths, requestedRunDirectory) : paths;
       const operation = startCommand(owner, argv, runPaths, { kind: 'command', ...commandLabel(argv), detached });
       return json(response, 202, { operationId: operation.id });
