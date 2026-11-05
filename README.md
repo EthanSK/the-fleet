@@ -193,7 +193,7 @@ is running, with no extra waiting or idle monitor. These are estimates: short
 processes can be missed, RSS includes shared pages and ps CPU percentages are
 process-lifetime averages. This starts a bounded measurement history; it does
 not yet predict each workload's resource cost. The 500-entry controller index
-keeps these small summaries after the full receipt folder is pruned. Automatic
+keeps these small summaries, job duration and source digest after the full receipt folder is pruned. Automatic
 receipts include `placement` values explaining the chosen worker.
 
 ## Shared controller setup

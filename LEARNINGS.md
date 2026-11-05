@@ -1,5 +1,7 @@
 # Fleet Runner lessons
 
+- A registered run's --source override changes the files, not the registered recipe. Qualify a changed recipe from a worktree with one-time submit using its full manifest. Packaging profiles must include every input the packager reads, including LICENSE and LICENSING.md; checking source alone missed the latter input until a real worker build exercised it.
+
 - Diagnose a missing log tail by comparing the controller log, retained worker log and producer's own saved report. Equal worker/controller bytes locate loss before collection. On POSIX, Node writes to pipes/FIFOs asynchronously: writableNeedDrain=false does not prove queued writes completed before process.exit. An Nx 23.3.1 probe lost the tail of an 11,008-byte FIFO write at exactly 8,192 bytes; awaiting the write callback preserved it. Fix producer completion rather than adding timed padding or assuming receipt success proves a complete console report.
 
 - Saved runs, one-time submits and external reservations must share automatic load-aware worker selection. This supersedes default-first placement: the saved default only breaks equal load comparisons, resolving a valid alias to its canonical entry. Count current coordinator leases synchronously just before admission because live CPU/memory observations can lag simultaneous clients. An explicit worker list and a project's worker pin remain binding. Prefer a worker before admission; never replay a failed or uncertain admitted job on another machine.
