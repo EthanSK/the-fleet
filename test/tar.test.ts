@@ -76,7 +76,16 @@ with tarfile.open(sys.argv[1], 'w', format=tarfile.PAX_FORMAT, pax_headers=spec[
         info.size = 1
         info.mtime = entry['mtime']
         info.pax_headers = entry.get('pax', {})
+        # Python 3.9 zeroes the classic mtime whenever a PAX mtime exists;
+        # newer writers retain it. Give the empty-override case a known base
+        # header so both versions actually test cancellation of global mtime.
+        classic = info.tobuf(format=tarfile.USTAR_FORMAT) if info.pax_headers.get('mtime') == '' else None
         archive.addfile(info, io.BytesIO(b'x'))
+        if classic is not None:
+            end = archive.fileobj.tell()
+            archive.fileobj.seek(end - 2 * tarfile.BLOCKSIZE)  # one header and one padded data block
+            archive.fileobj.write(classic)
+            archive.fileobj.seek(end)
 `, archive, JSON.stringify({ entries, global: globalPax })]);
   return archive;
 }
@@ -116,7 +125,8 @@ test('PAX file and global mtimes preserve fractions, overrides and pre-epoch dat
     await extractTarSafely(archive, destination, { allowedRoots: ['out'], maxBytes: 1024,
       expectedHashes: new Map(entries.map(({ name }) => [name, sha256('x')])) });
     for (const [name, expected] of [['global', 1650000000375], ['override', 1700000000125], ['cancel-global', 1600000000000], ['before-epoch', -1125.25]] as const) {
-      assert.ok(Math.abs(lstatSync(join(destination, 'out', name)).mtimeMs - expected) < 0.01, name);
+      const actual = lstatSync(join(destination, 'out', name)).mtimeMs;
+      assert.ok(Math.abs(actual - expected) < 0.01, JSON.stringify({ name, actual, expected }));
     }
   } finally {
     directory.cleanup();
