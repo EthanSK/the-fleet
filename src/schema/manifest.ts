@@ -69,6 +69,8 @@ export interface ProfileRequirements {
 }
 
 export interface Profile {
+  /** Explicit classification for wrappers; otherwise known E2E names/commands are recognized. */
+  readonly workload?: 'standard' | 'e2e';
   /** Maintenance or work which cannot coexist with another job. */
   readonly exclusive?: boolean;
   /** Worker-local conflicts, for example port:4200 or a shared DerivedData path. */
@@ -211,7 +213,7 @@ function parseArgv(reader: Reader, value: unknown): string[] {
 function parseProfile(reader: Reader, name: string, value: unknown): Profile {
   const profile = reader.object(value, [
     'description', 'kind', 'argv', 'prepare', 'cwd', 'env', 'pathPrepend', 'requires', 'timeoutMinutes', 'artifacts',
-    'maxArtifactMiB', 'success', 'cache', 'sourceTransfer', 'allowExtraArgs', 'isolatedTmp', 'blocked', 'extraInputs', 'finalizer', 'exclusive', 'resources',
+    'maxArtifactMiB', 'success', 'cache', 'sourceTransfer', 'allowExtraArgs', 'isolatedTmp', 'blocked', 'extraInputs', 'finalizer', 'exclusive', 'resources', 'workload',
   ]);
   const description = reader.child('description').string(profile['description']);
   const kindValue = reader.child('kind').string(profile['kind']);
@@ -272,6 +274,8 @@ function parseProfile(reader: Reader, name: string, value: unknown): Profile {
     reader.child('sourceTransfer').fail('rsync needs a named cache with a size limit');
   }
   const isolatedTmp = reader.child('isolatedTmp').optionalBoolean(profile['isolatedTmp']) ?? false;
+  const workload = reader.child('workload').optionalString(profile['workload']);
+  if (workload !== undefined && workload !== 'standard' && workload !== 'e2e') reader.child('workload').fail('must be standard or e2e');
   const resources = reader.child('resources').optionalStringArray(profile['resources'], { pattern: /^[a-zA-Z0-9][a-zA-Z0-9:._/-]{0,199}$/, patternHint: 'use a short named worker resource' }) ?? [];
   if (resources.length > (requires.guiSession ? 31 : 32)) reader.child('resources').fail('at most 32 resources including desktop');
   let finalizer: Profile['finalizer'];
@@ -283,6 +287,7 @@ function parseProfile(reader: Reader, name: string, value: unknown): Profile {
 
   return {
     name,
+    ...(workload === 'standard' || workload === 'e2e' ? { workload } : {}),
     exclusive: reader.child('exclusive').optionalBoolean(profile['exclusive']) ?? false,
     resources,
     description,

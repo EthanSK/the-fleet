@@ -17,7 +17,7 @@ import { evaluatePreflight, type PreflightReport } from '../run/preflight.ts';
 import { assessMemory } from '../run/memoryAssessment.ts';
 import { compareWorkerLoad, defaultMachineNames, localMachineFingerprint } from '../run/orderedMachines.ts';
 import { getProfile, makeJobId, runProfile, type RunRequest, type RunResult } from '../run/runJob.ts';
-import { claimsConflict, parseClaim, profileClaim, type CapacityClaim } from '../run/capacity.ts';
+import { e2eLimit, claimsConflict, parseClaim, profileClaim, type CapacityClaim } from '../run/capacity.ts';
 import { reportDiskSpaceProblem, type DiskSpaceProblemHandler } from '../run/diskSpace.ts';
 
 export interface WorkerObservation {
@@ -159,9 +159,18 @@ export class Coordinator {
     return report.fingerprint ? this.capacityUsed(report.fingerprint, report) : this.reservationsFor(machine).length;
   }
 
+  private e2eUsed(fingerprint: string, report?: PreflightReport): number {
+    const held = this.claims(fingerprint);
+    const knownJobs = new Set(held.map((lease) => lease.jobId));
+    // Unknown old managed work counts conservatively until its ownership is released.
+    return held.filter((lease) => lease.claim?.workload === 'e2e' || (lease.kind === 'managed' && lease.claim?.workload === undefined)).length
+      + (report?.sharedLocks ?? []).filter((lock) => lock.state !== 'free' && !knownJobs.has(lock.jobId) && report?.sharedWorkloads?.[lock.jobId] !== 'standard').length;
+  }
+
   private accepts(fingerprint: string, claim: CapacityClaim, machine: Machine, report?: PreflightReport): boolean {
     const held = this.claims(fingerprint);
-    return this.capacityUsed(fingerprint, report) < machine.limits.maxConcurrentJobs && held.every((lease) => !claimsConflict(claim, lease.claim ?? { mode: 'exclusive', resources: [] }));
+    return (claim.workload !== 'e2e' || this.e2eUsed(fingerprint, report) < e2eLimit(machine))
+      && this.capacityUsed(fingerprint, report) < machine.limits.maxConcurrentJobs && held.every((lease) => !claimsConflict(claim, lease.claim ?? { mode: 'exclusive', resources: [] }));
   }
 
   private remoteLocksFree(report: PreflightReport): boolean {
@@ -261,7 +270,7 @@ export class Coordinator {
           observedAt, available: refusals.length === 0, reasons: refusals,
           warnings: decision?.warnings.map((finding) => finding.message) ?? [],
           assignments: assignments.map(publicReservation),
-          capacity: { limit: machine.limits.maxConcurrentJobs, used, free: reservation || report?.lock.state !== 'free' ? 0 : Math.max(0, machine.limits.maxConcurrentJobs - used), draining: assignments.some((lease) => lease.claim?.mode === 'drain') },
+          capacity: { limit: machine.limits.maxConcurrentJobs, used, free: reservation || report?.lock.state !== 'free' ? 0 : Math.max(0, machine.limits.maxConcurrentJobs - used), draining: assignments.some((lease) => lease.claim?.mode === 'drain'), e2e: { limit: e2eLimit(machine), used: report?.fingerprint ? this.e2eUsed(report.fingerprint, report) : 0 } },
           ...(report ? { health: { ...report, tools: Object.fromEntries(report.tools) } } : {}),
           ...(report ? { memoryAssessment: assessMemory(report) } : {}),
           ...(this.maintenance.has(machine.id) ? { maintenance: this.maintenance.get(machine.id) } : {}),
@@ -437,6 +446,7 @@ export class Coordinator {
       return current !== undefined && current.remoteRoot === machine.remoteRoot
         && JSON.stringify(current.largeScratch) === JSON.stringify(machine.largeScratch)
         && current.limits.maxConcurrentJobs === machine.limits.maxConcurrentJobs
+        && e2eLimit(current) === e2eLimit(machine)
         && current.transport.target === machine.transport.target
         && current.transport.configPath === machine.transport.configPath;
     } catch { return false; }
@@ -462,7 +472,7 @@ export class Coordinator {
     const observation = request.preflightReport ? { report: request.preflightReport } : await this.inspect(request.machine, true);
     const fingerprint = observation.report?.fingerprint;
     if (!fingerprint) throw new FleetError('machineCheckRefused', 'Worker identity is not confirmed.');
-    const claim = profileClaim(getProfile(request.project, request.profileName), request.machine);
+    const claim = profileClaim(getProfile(request.project, request.profileName, request.extraArgs), request.machine);
     if (!this.accepts(fingerprint, claim, request.machine, observation.report)) return null;
     const jobId = makeJobId(request.project.manifest.id, request.profileName, new Date(this.dependencies.now()));
     const lease: Reservation = { id: operation, machineId: request.machine.id, fingerprint, owner,

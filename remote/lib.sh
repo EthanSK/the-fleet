@@ -99,6 +99,8 @@ fr_shared_states() {
           ;;
       esac
       printf 'shared_lock=%s\n' "$_shared_state"
+      _class=$(fr_kv_get "$_shared/owner" capacity_class)
+      case "$_class" in standard|e2e) printf 'shared_workload=%s %s\n' "${_shared##*/}" "$_class" ;; esac
       _pid=$(fr_kv_get "$_shared/owner" supervisor_pid)
       _start=$(fr_kv_get "$_shared/owner" supervisor_start)
       # Only a verified living supervisor can classify CPU work as managed.

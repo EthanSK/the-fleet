@@ -16,6 +16,7 @@ import { listRegistrations, loadMachines, loadProject, type LoadedProject } from
 import { classifyRun, isRunAbort, listReceipts, type Receipt, type RunAbort } from '../run/receipt.ts';
 import { getProfile, makeJobId, planRun, type RunResult } from '../run/runJob.ts';
 import { findMachine } from '../schema/machines.ts';
+import { profileWorkload } from '../run/capacity.ts';
 import type { Profile } from '../schema/manifest.ts';
 import { IDENTIFIER_HINT, IDENTIFIER_PATTERN, Reader } from '../schema/validate.ts';
 import { notFound } from './apiError.ts';
@@ -33,6 +34,7 @@ function profileView(profile: Profile): Record<string, unknown> {
   return {
     name: profile.name,
     kind: profile.kind,
+    workload: profileWorkload(profile),
     description: profile.description,
     blocked: profile.blocked ?? null,
     command: profile.argv,

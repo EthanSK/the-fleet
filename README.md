@@ -245,10 +245,23 @@ writes instead of quietly filling another disk; settings remain accessible.
 ## Shared job capacity
 
 Ordinary managed jobs share a ship, up to private ship setting
-`limits.maxConcurrentJobs` (default 2, range 1–8). These are **job slots**,
+`limits.maxConcurrentJobs` (default 2, range 1–16). These are **job slots**,
 not estimates of a job's future CPU/RAM use. Fresh disk, available memory and
 kernel-pressure checks still apply; CPU load informs automatic placement and
 is also reported for the caller's judgment; job slots still cannot predict the cost of a new job, so CPU overcommit remains possible. Raw swap is display-only.
+
+Browser/E2E work also respects `limits.maxConcurrentE2eJobs`. Omit it to keep
+older inventories' ordinary limit. Raising ordinary capacity need not raise this
+separate ceiling. E2E jobs still consume an ordinary slot as well; both limits
+must have room. The coordinator and inherited remote kernel locks enforce them.
+State exposes the E2E limit and usage under `capacity.e2e`.
+
+Profiles and one-time requests accept `workload: "e2e"` or `"standard"`.
+Without an override, familiar `e2e`, `playwright` and `cypress` tokens in the
+profile name or command select the E2E budget. For opaque scripts or dynamically
+selected tests, declare the workload explicitly; the runner cannot infer hidden
+commands. External reservations accept the same `claim.workload` or CLI
+`--workload e2e`. This does not remove desktop, cache or exclusive conflicts.
 
 Set a profile's `exclusive: true` for work which needs the ship alone.
 Declare ship-local conflicts in `resources`, for example `["port:4200"]`.

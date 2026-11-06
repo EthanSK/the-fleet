@@ -73,3 +73,7 @@
 ## 2026-11-05 — Reuse checksum-verified release signing tools
 
 Release workflows invoke the signing host's versioned Sparkle copy at `~/.local/share/sparkle-tools/2.10.1/bin`, after comparing it with the freshly downloaded, checksum-verified SDK. Provision this directory during signing-host setup; a missing or mismatched copy blocks signing instead of invoking an unverified or disposable helper. Keep per-app Keychain accounts and public-key checks. Reusing identical tool bytes does not promise approval survives a tool upgrade or a changed key.
+
+## 2026-11-06 — Independent ordinary and E2E ceilings
+
+A whole-ship external reservation can report zero free capacity while consuming only one ordinary slot. Raising slot limits cannot bypass that deliberate exclusive claim. Classify browser/E2E work once from explicit metadata or known command/profile tokens (including extra CLI arguments), and carry that decision through coordinator reservations, preflight and remote kernel admission. E2E work takes both an ordinary slot and a separate E2E slot; old unknown managed records count conservatively for the E2E ceiling. Keep expiry as uncertain ownership, not automatic proof of cleanup.

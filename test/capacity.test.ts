@@ -13,7 +13,7 @@ import { fetchPreflight, fetchStatus, runControl } from '../src/run/remoteChecks
 import { cancelCommand, lockCommand, statusCommand } from '../src/cli/runCommands.ts';
 import { evaluatePreflight, parsePreflight } from '../src/run/preflight.ts';
 import { Coordinator, type CoordinatorDependencies } from '../src/service/coordinator.ts';
-import { claimsConflict, parseClaim } from '../src/run/capacity.ts';
+import { claimsConflict, parseClaim, profileWorkload } from '../src/run/capacity.ts';
 import { RunNotStartedError } from '../src/errors.ts';
 import { report } from './helpers/serviceFixture.ts';
 import { testEnvironment, testMachine, waitUntil, writeFiles } from './helpers/fixtures.ts';
@@ -335,4 +335,64 @@ test('different cache names cannot collide with access and usage lock roles', { 
     f.release('first'); f.release('second');
     assert.equal((await first).receipt.outcome, 'passed'); assert.equal((await second).receipt.outcome, 'passed');
   } finally { a.interrupts?.trigger(); b.interrupts?.trigger(); await Promise.allSettled([first,second]); f.env.cleanup(); }
+});
+
+
+test('E2E kernel slots stay bounded while ordinary work overlaps and cancellation frees only its own budget', { timeout: 45000 }, async () => {
+  const f = fixture();
+  const machine = { ...f.machine, limits: { ...f.machine.limits, maxConcurrentJobs: 10, maxConcurrentE2eJobs: 1 } };
+  const a = { ...f.request('browser-first', { workload: 'e2e' }), machine };
+  const b = { ...f.request('browser-second', { workload: 'e2e' }), machine };
+  const light = { ...f.request('typecheck', { workload: 'standard' }), machine };
+  let browser: ReturnType<typeof runProfile> | undefined, background: ReturnType<typeof runProfile> | undefined, replacement: ReturnType<typeof runProfile> | undefined;
+  try {
+    const before = await fetchPreflight(f.transport, machine, [], []);
+    browser = runProfile(a); assert.equal(await f.started('browser-first'), true);
+    background = runProfile(light); assert.equal(await f.started('typecheck'), true);
+    // Deliberately stale preflight simulates another controller's admission race.
+    const refused = await runProfile({ ...b, preflightReport: before });
+    assert.equal(refused.admission, 'refused');
+    assert.equal(existsSync(join(f.env.root, 'started-browser-second')), false);
+    const live = await fetchPreflight(f.transport, machine, [], []);
+    assert.deepEqual(Object.values(live.sharedWorkloads ?? {}).sort(), ['e2e', 'standard']);
+    a.interrupts?.trigger(); assert.equal((await browser).receipt.outcome, 'cancelled');
+    assert.equal((await fetchPreflight(f.transport, machine, [], [])).sharedLocks?.length, 1);
+    replacement = runProfile(b); assert.equal(await f.started('browser-second'), true);
+    f.release('browser-second'); f.release('typecheck');
+    assert.equal((await replacement).receipt.outcome, 'passed');
+    assert.equal((await background).receipt.outcome, 'passed');
+  } finally { a.interrupts?.trigger(); b.interrupts?.trigger(); light.interrupts?.trigger(); await Promise.allSettled([browser, background, replacement]); f.env.cleanup(); }
+});
+
+test('coordinator exposes and retains independent E2E capacity across restart', async () => {
+  const f = fixture();
+  const machine = { ...f.machine, limits: { ...f.machine.limits, maxConcurrentJobs: 10, maxConcurrentE2eJobs: 2 } };
+  const dependencies: CoordinatorDependencies = { machines: () => [machine], inspect: async () => ({ machine, observedAt: new Date().toISOString(), report: report('physical') }), localFingerprint: async () => 'dispatcher', now: Date.now, route: () => ({ target: 'fixture', host: 'localhost', user: 'tester', port: 22, path: 'internet' }), execute: async () => { throw Error('unused'); } };
+  const c = new Coordinator(f.env.paths, dependencies);
+  type Lease = { token: string; reservation: { id: string } };
+  try {
+    const a = await c.reserve('one', 'e2e', ['mini'], 180, { mode: 'shared', resources: [], workload: 'e2e' }) as Lease;
+    await c.reserve('two', 'e2e', ['mini'], 180, { mode: 'shared', resources: [], workload: 'e2e' });
+    await assert.rejects(c.reserve('three', 'e2e', ['mini'], 180, { mode: 'shared', resources: [], workload: 'e2e' }));
+    await c.reserve('light', 'check', ['mini'], 180, { mode: 'shared', resources: [], workload: 'standard' });
+    const restarted = new Coordinator(f.env.paths, dependencies);
+    const state = await restarted.state(true) as { workers: { capacity: { used: number; e2e: { limit: number; used: number } } }[] };
+    assert.equal(state.workers[0]?.capacity.used, 3);
+    assert.deepEqual(state.workers[0]?.capacity.e2e, { limit: 2, used: 2 });
+    await assert.rejects(restarted.reserve('three', 'e2e', ['mini'], 180, { mode: 'shared', resources: [], workload: 'e2e' }));
+    await restarted.release(a.reservation.id, a.token, true);
+    await restarted.reserve('three', 'e2e', ['mini'], 180, { mode: 'shared', resources: [], workload: 'e2e' });
+  } finally { f.env.cleanup(); }
+});
+
+test('workload classification recognizes browser commands and lets opaque wrappers declare their budget', () => {
+  const make = (name: string, argv: string[], workload?: 'standard' | 'e2e') => ({ name, argv, ...(workload ? { workload } : {}) });
+  for (const value of [make('browser', ['npx', 'playwright', 'test']), make('frontend-e2e', ['bash', 'script.sh']), make('test', ['bash', '-lc', 'npm run e2e'])]) {
+    assert.equal(profileWorkload(value), 'e2e');
+  }
+  assert.equal(profileWorkload(make('check', ['npm', 'run', 'typecheck'])), 'standard');
+  assert.equal(profileWorkload(make('e2e-config-unit', ['node', '--test'], 'standard')), 'standard');
+  assert.equal(profileWorkload(make('checks', ['nx', 'run']), ['frontend-e2e:test']), 'e2e');
+  assert.equal(parseClaim({ mode: 'shared', workload: 'e2e' }).workload, 'e2e');
+  assert.throws(() => parseClaim({ mode: 'shared', workload: 'typo' }));
 });

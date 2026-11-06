@@ -39,6 +39,8 @@ export interface LargeScratch {
 export interface MachineLimits {
   /** Bounded ordinary-job overlap; live memory/disk/pressure checks still apply. */
   readonly maxConcurrentJobs: number;
+  /** Separate browser/E2E ceiling; absent means the ordinary limit for older inventories. */
+  readonly maxConcurrentE2eJobs?: number;
   readonly minFreeDiskGiB: number;
   readonly minAvailableMemoryGiB: number;
   readonly memoryPressure: MemoryPressurePolicy;
@@ -187,7 +189,7 @@ function parseLimits(reader: Reader, value: unknown): MachineLimits {
   if (value === undefined) return DEFAULT_LIMITS;
   const limits = reader.object(value, [
     'minFreeDiskGiB', 'minAvailableMemoryGiB', 'memoryPressure', 'heavyProcessNames', 'heavyProcessAction', 'keepJobs',
-    'uploadTimeoutMinutes', 'terminateGraceSeconds', 'maxConcurrentJobs',
+    'uploadTimeoutMinutes', 'terminateGraceSeconds', 'maxConcurrentJobs', 'maxConcurrentE2eJobs',
   ]);
   const memoryPressure = reader.child('memoryPressure').optionalString(limits['memoryPressure']) ?? DEFAULT_LIMITS.memoryPressure;
   const pressurePolicies: readonly MemoryPressurePolicy[] = ['refuse-critical', 'refuse-warn', 'report-only'];
@@ -195,7 +197,8 @@ function parseLimits(reader: Reader, value: unknown): MachineLimits {
   const heavyProcessAction = reader.child('heavyProcessAction').optionalString(limits['heavyProcessAction']) ?? DEFAULT_LIMITS.heavyProcessAction;
   if (heavyProcessAction !== 'refuse' && heavyProcessAction !== 'warn') reader.child('heavyProcessAction').fail('must be "refuse" or "warn"');
   return {
-    maxConcurrentJobs: reader.child('maxConcurrentJobs').optionalNumber(limits['maxConcurrentJobs'], { min: 1, max: 8, integer: true }) ?? DEFAULT_LIMITS.maxConcurrentJobs,
+    maxConcurrentJobs: reader.child('maxConcurrentJobs').optionalNumber(limits['maxConcurrentJobs'], { min: 1, max: 16, integer: true }) ?? DEFAULT_LIMITS.maxConcurrentJobs,
+    ...(limits['maxConcurrentE2eJobs'] === undefined ? {} : { maxConcurrentE2eJobs: reader.child('maxConcurrentE2eJobs').number(limits['maxConcurrentE2eJobs'], { min: 1, max: 16, integer: true }) }),
     minFreeDiskGiB: reader.child('minFreeDiskGiB').optionalNumber(limits['minFreeDiskGiB'], { min: 0 }) ?? DEFAULT_LIMITS.minFreeDiskGiB,
     minAvailableMemoryGiB: reader.child('minAvailableMemoryGiB').optionalNumber(limits['minAvailableMemoryGiB'], { min: 0 }) ?? DEFAULT_LIMITS.minAvailableMemoryGiB,
     memoryPressure: memoryPressure as MemoryPressurePolicy,

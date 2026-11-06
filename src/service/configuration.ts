@@ -28,7 +28,7 @@ export interface ConfigurationDependencies {
   readonly bridgeConfigPath: () => string;
 }
 
-const LIMIT_KEYS = ['maxConcurrentJobs', 'minFreeDiskGiB', 'minAvailableMemoryGiB', 'memoryPressure', 'heavyProcessNames', 'heavyProcessAction', 'keepJobs', 'uploadTimeoutMinutes', 'terminateGraceSeconds'] as const;
+const LIMIT_KEYS = ['maxConcurrentE2eJobs', 'maxConcurrentJobs', 'minFreeDiskGiB', 'minAvailableMemoryGiB', 'memoryPressure', 'heavyProcessNames', 'heavyProcessAction', 'keepJobs', 'uploadTimeoutMinutes', 'terminateGraceSeconds'] as const;
 
 /** Changes whenever machines.json changes on disk, including edits made outside this API. */
 export function machinesRevision(paths: StatePaths): string {
@@ -199,7 +199,9 @@ export async function editMachine(paths: StatePaths, dependencies: Configuration
   const routeChanged = target !== current.transport.target;
   const rootChanged = next.remoteRoot !== current.remoteRoot;
   if (JSON.stringify(next.largeScratch) !== JSON.stringify(current.largeScratch)) dependencies.coordinator.assertUnreserved(current, 'Change its large scratch destination');
-  if (next.limits.maxConcurrentJobs !== current.limits.maxConcurrentJobs) dependencies.coordinator.assertUnreserved(current, 'Change its job capacity');
+  // Increasing capacity preserves every admitted job and its captured settings.
+  if (next.limits.maxConcurrentJobs < current.limits.maxConcurrentJobs
+    || (next.limits.maxConcurrentE2eJobs ?? next.limits.maxConcurrentJobs) < (current.limits.maxConcurrentE2eJobs ?? current.limits.maxConcurrentJobs)) dependencies.coordinator.assertUnreserved(current, 'Reduce its job capacity');
   if (routeChanged) dependencies.route(target, current.transport.configPath);
   if (routeChanged || rootChanged) {
     await dependencies.coordinator.assertReconfigurable(current, { root: rootChanged });

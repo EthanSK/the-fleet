@@ -10,11 +10,12 @@ import type { Machine } from '../src/schema/machines.ts';
 import { report } from './helpers/serviceFixture.ts';
 import { testMachine } from './helpers/fixtures.ts';
 
-for (const change of ['connection', 'folder', 'removal', 'capacity'] as const) {
+for (const change of ['connection', 'folder', 'removal', 'capacity', 'e2e-capacity'] as const) {
   test(`external reservation refuses ${change} changed during inspection`, async () => {
     const root = mkdtempSync('/tmp/fleet-reserve-settings-');
     const paths = resolveStatePaths({ THE_FLEET_HOME: root });
-    const machine = testMachine();
+    const original = testMachine();
+    const machine = change === 'e2e-capacity' ? { ...original, limits: { ...original.limits, maxConcurrentJobs: 3, maxConcurrentE2eJobs: 1 } } : original;
     saveMachines(paths, { schemaVersion: 1, machines: [machine] });
     let release!: () => void;
     let inspected!: () => void;
@@ -39,6 +40,7 @@ for (const change of ['connection', 'folder', 'removal', 'capacity'] as const) {
       await waiting;
       const changed: Machine = change === 'connection'
         ? { ...machine, transport: { ...machine.transport, target: 'NewTarget' } }
+        : change === 'e2e-capacity' ? { ...machine, limits: { ...machine.limits, maxConcurrentE2eJobs: 2 } }
         : change === 'capacity' ? { ...machine, limits: { ...machine.limits, maxConcurrentJobs: 2 } }
         : { ...machine, remoteRoot: '~/Changed.noindex' };
       saveMachines(paths, { schemaVersion: 1, machines: change === 'removal' ? [] : [changed] });

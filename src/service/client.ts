@@ -162,7 +162,7 @@ export async function runClient(argv: readonly string[]): Promise<number> {
   }
   if (argv[0] === 'service') { print(await callApi(paths, argv[1] === 'stop' ? 'POST' : 'GET', argv[1] === 'stop' ? '/v1/stop' : '/v1/health', argv[1] === 'stop' ? {} : undefined)); return 0; }
   if (argv[0] === 'reserve') {
-    print(await callApi(paths, 'POST', '/v1/reservations', { owner, label: argument(argv, '--label') ?? 'External SSH work', machines: argument(argv, '--machines')?.split(','), ttlSeconds: Number(argument(argv, '--ttl') ?? 180), claim: { mode: argv.includes('--drain') ? 'drain' : argv.includes('--shared') ? 'shared' : 'exclusive', resources: argument(argv, '--resources')?.split(',') ?? [] } })); return 0;
+    print(await callApi(paths, 'POST', '/v1/reservations', { owner, label: argument(argv, '--label') ?? 'External SSH work', machines: argument(argv, '--machines')?.split(','), ttlSeconds: Number(argument(argv, '--ttl') ?? 180), claim: { mode: argv.includes('--drain') ? 'drain' : argv.includes('--shared') ? 'shared' : 'exclusive', resources: argument(argv, '--resources')?.split(',') ?? [], ...(argument(argv, '--workload') === undefined ? {} : { workload: argument(argv, '--workload') }) } })); return 0;
   }
   if (argv[0] === 'renew' || argv[0] === 'release' || argv[0] === 'activate') { print(await callApi(paths, 'POST', `/v1/${argv[0]}`, { id: argument(argv, '--id'), token: argument(argv, '--token'), ttlSeconds: Number(argument(argv, '--ttl') ?? 180), workStopped: argv.includes('--work-stopped') })); return 0; }
   if (argv[0] === 'recover-reservations') { print(await callApi(paths, 'POST', '/v1/recover', {})); return 0; }

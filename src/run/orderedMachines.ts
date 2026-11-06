@@ -92,7 +92,7 @@ export function compareWorkerLoad(
 }
 
 export async function runOnOrderedMachines(request: OrderedRunRequest): Promise<RunResult> {
-  const profile = getProfile(request.project, request.profileName);
+  const profile = getProfile(request.project, request.profileName, request.extraArgs);
   const dispatcher = request.dispatcherFingerprint ?? await localMachineFingerprint();
   const skipped: string[] = [];
   const seenPhysicalMachines = new Set<string>();

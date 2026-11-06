@@ -14,7 +14,7 @@
 
 import type { Machine } from '../schema/machines.ts';
 import type { Profile } from '../schema/manifest.ts';
-import { profileClaim } from './capacity.ts';
+import { e2eLimit, profileWorkload, profileClaim } from './capacity.ts';
 
 export type LockState =
   | { readonly state: 'free' }
@@ -69,6 +69,7 @@ export interface PreflightReport {
   readonly heavy: readonly HeavyProcess[];
   readonly lock: LockState;
   readonly sharedLocks?: readonly LockState[];
+  readonly sharedWorkloads?: Readonly<Record<string, 'standard' | 'e2e'>>;
   readonly managedPgids?: readonly number[];
   /** Fresh kernel probe used for recovery, never inferred from owner files. */
   readonly admissionFree?: boolean;
@@ -95,6 +96,7 @@ export function parsePreflight(text: string): PreflightReport {
   const heavy: HeavyProcess[] = [];
   const missingBaseTools: string[] = [];
   const sharedLocks: LockState[] = [];
+  const sharedWorkloads: Record<string, 'standard' | 'e2e'> = {};
   const managedPgids: number[] = [];
   for (const line of text.split('\n')) {
     const equals = line.indexOf('=');
@@ -104,6 +106,9 @@ export function parsePreflight(text: string): PreflightReport {
     if (key === 'shared_lock') {
       const lock = parseLockState(value);
       if (lock.state !== 'free') sharedLocks.push(lock);
+    } else if (key === 'shared_workload') {
+      const [id, workload] = value.split(' ');
+      if (id && (workload === 'standard' || workload === 'e2e')) sharedWorkloads[id] = workload;
     } else if (key === 'managed_pgid') {
       if (/^[1-9][0-9]*$/.test(value)) managedPgids.push(Number(value));
     } else if (key === 'tool') {
@@ -169,7 +174,7 @@ export function parsePreflight(text: string): PreflightReport {
     tools,
     heavy,
     lock: parseLockState(values.get('lock') ?? 'busy - - - unknown'),
-    sharedLocks,
+    sharedLocks, sharedWorkloads,
     managedPgids,
     ...(values.has('admission_free') ? { admissionFree: values.get('admission_free') === '1' } : {}),
   };
@@ -240,6 +245,10 @@ export function evaluatePreflight(
   if (sharedLocks.length && (!shared || sharedLocks.length >= machine.limits.maxConcurrentJobs || sharedLocks.some((entry) => entry.jobId === '-'))) {
     const stale = sharedLocks.find((entry) => entry.state === 'stale');
     refusals.push((stale && describeLock(machine, stale, options.nowEpoch)) || { kind: 'busy', message: `${machine.id}: shared job capacity is occupied or requires recovery (${sharedLocks.map((entry) => entry.jobId).join(', ')})` });
+  }
+
+  if (profile && profileWorkload(profile) === 'e2e' && sharedLocks.filter((lock) => report.sharedWorkloads?.[lock.jobId] !== 'standard').length >= e2eLimit(machine)) {
+    refusals.push({ kind: 'busy', message: `${machine.id}: E2E job slots are occupied.` });
   }
 
   for (const tool of report.missingBaseTools) {

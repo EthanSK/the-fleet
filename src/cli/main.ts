@@ -23,7 +23,7 @@ Coordinator
   the-fleet submit <request.json | -> [--machine <name> | --machines <name,...>]
   the-fleet submit <request.json | -> --dry-run [--machine <name>]
   the-fleet maintain [--machine <name>]
-  the-fleet reserve --owner <app> --label <work> [--machines <name,...>] [--shared | --drain] [--resources <name,...>]
+  the-fleet reserve --owner <app> --label <work> [--machines <name,...>] [--shared | --drain] [--resources <name,...>] [--workload standard|e2e]
   the-fleet renew --id <id> --token <token> [--ttl <seconds>]
   the-fleet release --id <id> --token <token> [--work-stopped]
   the-fleet activate --id <id> --token <token>

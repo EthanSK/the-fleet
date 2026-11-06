@@ -137,6 +137,7 @@ export function inlineProject(input: Record<string, unknown>, cwd: string): { pr
       ...(input['success'] === undefined ? {} : { success: input['success'] }),
       ...(input['artifacts'] === undefined ? {} : { artifacts: input['artifacts'] }),
       ...(input['env'] === undefined ? {} : { env: input['env'] }),
+      ...(input['workload'] === undefined ? {} : { workload: input['workload'] }),
       ...(input['cache'] === undefined ? {} : { cache: input['cache'] }),
       ...(input['sourceTransfer'] === undefined ? {} : { sourceTransfer: input['sourceTransfer'] }),
     } },

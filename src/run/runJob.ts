@@ -19,6 +19,7 @@
 // job's process group, cleans up and releases the lock); a second interrupt
 // drops the connection, which the supervisor also treats as a cancel.
 
+import { profileWorkload } from './capacity.ts';
 import { randomBytes } from 'node:crypto';
 import { createWriteStream, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -111,12 +112,12 @@ export interface RunResult {
   readonly admission: 'refused' | 'admitted' | 'uncertain';
 }
 
-export function getProfile(project: LoadedProject, profileName: string): Profile {
+export function getProfile(project: LoadedProject, profileName: string, extraArgs: readonly string[] = []): Profile {
   const profile = project.manifest.profiles[profileName];
   if (!profile) {
     throw usageError(`${project.manifest.id} has no profile "${profileName}". Profiles: ${Object.keys(project.manifest.profiles).join(', ')}`);
   }
-  return profile;
+  return profile.workload === undefined ? { ...profile, workload: profileWorkload(profile, extraArgs) } : profile;
 }
 
 export function makeJobId(project: string, profile: string, now: Date): string {
@@ -132,7 +133,7 @@ export async function planRun(request: Pick<RunRequest, 'project' | 'profileName
   finalizerScript?: string;
   label: string;
 }> {
-  const profile = getProfile(request.project, request.profileName);
+  const profile = getProfile(request.project, request.profileName, request.extraArgs);
   const label = `${request.project.manifest.id}/${profile.name}`;
   if (profile.blocked !== undefined) throw usageError(`${label} is blocked: ${profile.blocked}`);
   const script = renderCommandScript({ profile, machine: request.machine, extraArgs: request.extraArgs, jobId, label });

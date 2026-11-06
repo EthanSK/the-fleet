@@ -36,6 +36,7 @@ if descriptor != 200:
 os.environ.pop('FR_JOB_LOCK', None)
 os.environ.pop('FLEET_RUNNER_SHARED_JOB', None)
 os.environ.pop('FLEET_RUNNER_CLAIM_CACHE', None)
+os.environ.pop('FLEET_RUNNER_WORKLOAD', None)
 if mode != 'shared':
     os.execv('/bin/bash', ['bash', '-c', script, name, *arguments])
 
@@ -48,7 +49,7 @@ if not re.fullmatch(r'[a-z0-9][a-z0-9-]*', job_id):
 claim = json.loads(arguments[8])
 slots = claim['slots']
 resources = claim['resources']
-if type(slots) is not int or not 1 <= slots <= 8 or not isinstance(resources, list) or len(resources) > 32:
+if type(slots) is not int or not 1 <= slots <= 16 or not isinstance(resources, list) or len(resources) > 32:
     sys.exit(64)
 inherited = [200]
 
@@ -70,6 +71,26 @@ for index in range(slots):
         os.close(fd)
 else:
     busy()
+# A second inherited semaphore preserves the browser/E2E ceiling independently
+# of ordinary slots, including admission races between separate controllers.
+workload = claim.get('workload', 'standard')
+if workload not in ('standard', 'e2e'):
+    sys.exit(64)
+os.environ['FLEET_RUNNER_WORKLOAD'] = workload
+if workload == 'e2e':
+    e2e_slots = claim.get('e2eSlots', slots)
+    if type(e2e_slots) is not int or not 1 <= e2e_slots <= slots:
+        sys.exit(64)
+    for index in range(e2e_slots):
+        fd = os.open(os.path.join(root, 'locks', 'e2e-slot-' + str(index)), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            inherit(fd)
+            break
+        except BlockingIOError:
+            os.close(fd)
+    else:
+        busy()
 for resource in sorted(set(resources)):
     if not isinstance(resource, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9:._/-]{0,199}', resource):
         sys.exit(64)

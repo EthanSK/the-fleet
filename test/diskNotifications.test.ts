@@ -68,10 +68,12 @@ test('a pinned run reports its actual disk refusal before starting a supervisor'
   } finally { env.cleanup(); }
 });
 
+// These workers model disk faults; host compilers from neighbouring fleet jobs
+// must not turn the synthetic worker into a heavy-process refusal.
 async function addWorkers(f: ServiceFixture) {
   for (const [id, target] of [['mini', 'Mac-Mini'], ['second', 'OldMacBookPro']]) {
     const revision = (await f.call('GET', '/v1/config')).body['revision'];
-    assert.equal((await f.call('POST', '/v1/machines', { revision, id, target })).status, 200);
+    assert.equal((await f.call('POST', '/v1/machines', { revision, id, target, limits: { heavyProcessNames: [] } })).status, 200);
     f.reports.set(target ?? '', report(id ?? 'worker'));
   }
 }

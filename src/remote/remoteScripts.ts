@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Machine } from '../schema/machines.ts';
 import type { Profile } from '../schema/manifest.ts';
-import { profileClaim } from '../run/capacity.ts';
+import { e2eLimit, profileClaim } from '../run/capacity.ts';
 import { inlineBashCommand, remotePathWord, shellQuote } from '../transport/shellQuote.ts';
 
 const REMOTE_DIRECTORY = new URL('../../remote/', import.meta.url);
@@ -46,7 +46,7 @@ export function supervisorCommand(machine: Machine, args: SupervisorArguments): 
     shellQuote(String(Math.round(machine.limits.uploadTimeoutMinutes * 60))),
     shellQuote(String(machine.limits.keepJobs)),
     shellQuote(args.label),
-    shellQuote(JSON.stringify({ slots: machine.limits.maxConcurrentJobs, resources: claim?.resources ?? [], cache: claim?.cache, cacheMaxKiB: args.profile?.cache ? Math.round(args.profile.cache.maxGiB * 1024 ** 2) : 0 })),
+    shellQuote(JSON.stringify({ slots: machine.limits.maxConcurrentJobs, workload: claim?.workload ?? 'standard', e2eSlots: e2eLimit(machine), resources: claim?.resources ?? [], cache: claim?.cache, cacheMaxKiB: args.profile?.cache ? Math.round(args.profile.cache.maxGiB * 1024 ** 2) : 0 })),
   ]);
 }
 

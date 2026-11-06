@@ -87,6 +87,7 @@ fr_write_owner() {
     printf 'job_pgid=%s\n' "$JOB_PGID"
     printf 'job_start=%s\n' "$(fr_proc_start "$JOB_PGID")"
     printf 'job_dir=%s\n' "$JOB_DIR"
+    printf 'capacity_class=%s\n' "${FLEET_RUNNER_WORKLOAD:-standard}"
     printf 'cache_name=%s\n' "${FLEET_RUNNER_CLAIM_CACHE:-}"
   } > "$_tmp" && mv -f "$_tmp" "$LOCK/owner"
 }
