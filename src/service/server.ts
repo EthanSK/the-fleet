@@ -204,6 +204,10 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
   const abandonAfterMs = options.abandonAfterMs ?? 75_000;
   let stopping = false;
 
+  function assertAcceptingOperations(): void {
+    if (stopping) throw new FleetError('machineBusy', 'The Fleet is stopping.');
+  }
+
   const diskNotifier = (id: string) => operationDiskNotifier(id, options.notifyDiskSpace,
     (error) => process.stderr.write(`The Fleet disk notification failed: ${error instanceof Error ? error.message : String(error)}\n`));
 
@@ -221,6 +225,9 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
   }
 
   function createOperation(owner: string, meta: OperationMeta, execute: (operation: Operation, output: Writable) => Promise<number>): Operation {
+    // Run-path validation can wait on removable storage. A stop may have
+    // happened before that validation returned.
+    assertAcceptingOperations();
     const id = randomBytes(12).toString('hex');
     const operation: Operation = { id, owner, ...meta, createdAt: Date.now(), jobIds: [], status: 'running', output: '', offset: 0,
       lastSeen: Date.now(), cancelRequested: false, interrupts: new Interrupts(), onDiskSpaceProblem: diskNotifier(id) };
@@ -315,7 +322,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
     if (method === 'GET' && path === '/v1/config') return json(response, 200, configurationView(paths));
     if (method === 'PUT' && path === '/v1/config/controller') {
       if (stopping) throw new FleetError('machineBusy', 'The Fleet is stopping.');
-      editControllerConfiguration(paths, await body(request));
+      await editControllerConfiguration(paths, await body(request));
       return json(response, 200, configurationView(paths));
     }
     if (method === 'GET' && path === '/v1/pairings') return json(response, 200, pairingsView(paths, configuration));
@@ -353,7 +360,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       const ordered = input['machines'] === undefined ? [] : ['--machines', strings(input['machines'], 'machines').join(',')];
       const cwd = homedir();
       const argv = normalizedArguments(['run', projectId, profileName, ...pinned, ...ordered], cwd);
-      const operation = startCommand(text(input['owner'] ?? 'local-client', 'owner', 200), argv, resolveRunPaths(paths),
+      const operation = startCommand(text(input['owner'] ?? 'local-client', 'owner', 200), argv, await resolveRunPaths(paths),
         { kind: 'run', label: `${projectId}/${profileName}`, project: projectId, profile: profileName, detached: flag(input['detached'], 'detached') });
       return json(response, 202, { operationId: operation.id, operation: publicOperation(operation) });
     }
@@ -361,13 +368,13 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       const limit = Number(url.searchParams.get('limit') ?? 100);
       if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw usageError('limit must be 1–500.');
       const project = url.searchParams.get('project');
-      return json(response, 200, runsView(paths, { limit, ...(project ? { project } : {}) }));
+      return json(response, 200, await runsView(paths, { limit, ...(project ? { project } : {}) }));
     }
     const runMatch = /^\/v1\/runs\/([^/]+)$/.exec(path);
     if (runMatch && method === 'GET') {
       const tail = Number(url.searchParams.get('tail') ?? 256 * 1024);
       if (!Number.isInteger(tail) || tail < 1024 || tail > 1024 * 1024) throw usageError('tail must be 1 KiB–1 MiB.');
-      return json(response, 200, runDetailView(paths, decodeURIComponent(runMatch[1] ?? ''), tail));
+      return json(response, 200, await runDetailView(paths, decodeURIComponent(runMatch[1] ?? ''), tail));
     }
 
     // ---- operations
@@ -415,7 +422,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
         const oneTime = inlineProject(record(input['request']), cwd);
         if (path === '/v1/submit/plan') return json(response, 200, await planView(paths, oneTime.project.manifest.id,
           { profile: oneTime.profileName, ...(input['machine'] === undefined ? {} : { machine: input['machine'] }) }, oneTime.project));
-        const runPaths = resolveRunPaths(paths, requestedRunDirectory);
+        const runPaths = await resolveRunPaths(paths, requestedRunDirectory);
         const operation = createOperation(owner, { kind: 'submit', label: `${oneTime.project.manifest.id}/${oneTime.profileName}`, project: oneTime.project.manifest.id, profile: oneTime.profileName, detached }, async (op, output) => {
           const registry = loadMachines(paths);
           // A controller default is a preference; a manifest default is a
@@ -434,7 +441,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
         return json(response, 202, { operationId: operation.id });
       }
       const argv = normalizedArguments(strings(input['argv'], 'argv'), cwd);
-      const runPaths = ['run', 'recover'].includes(argv[0] ?? '') ? resolveRunPaths(paths, requestedRunDirectory) : paths;
+      const runPaths = ['run', 'recover'].includes(argv[0] ?? '') ? await resolveRunPaths(paths, requestedRunDirectory) : paths;
       const operation = startCommand(owner, argv, runPaths, { kind: 'command', ...commandLabel(argv), detached });
       return json(response, 202, { operationId: operation.id });
     }

@@ -21,10 +21,10 @@
 
 import { profileWorkload } from './capacity.ts';
 import { randomBytes } from 'node:crypto';
-import { createWriteStream, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, readFileSync, promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { Readable, type Writable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { finished, pipeline } from 'node:stream/promises';
 import { EXIT_CODES, FleetError, RunNotStartedError, usageError } from '../errors.ts';
 import type { StatePaths } from '../paths.ts';
 import type { LoadedProject } from '../registry.ts';
@@ -39,7 +39,7 @@ import { firstLines, type Transport } from '../transport/transport.ts';
 import { renderCommandScript } from './commandScript.ts';
 import { JobSession, TimeoutWaitingError } from './jobSession.ts';
 import { evaluatePreflight, formatDuration, type PreflightReport } from './preflight.ts';
-import { createRunDirectory, pruneAbandonedSourceStages, pruneRuns, writeReceipt, type Receipt, type RunAbort, type RunOutcomeKind } from './receipt.ts';
+import { createRunDirectory, pruneAbandonedSourceStages, pruneRuns, readLogTail, writeReceipt, type Receipt, type RunAbort, type RunOutcomeKind } from './receipt.ts';
 import { fetchPreflight } from './remoteChecks.ts';
 import { evaluateSuccess, type SuccessEvaluation } from './success.ts';
 import { syncSource, type RsyncStatistics } from './rsyncTransfer.ts';
@@ -213,10 +213,22 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
   }
 
   // ---- local run folder
-  pruneAbandonedSourceStages(paths);
-  const runDirectory = createRunDirectory(paths, jobId);
-  writeFileSync(join(runDirectory, 'source-manifest.tsv'), plan.manifestText, { mode: 0o600 });
-  writeFileSync(join(runDirectory, 'command.sh'), script, { mode: 0o600 });
+  await pruneAbandonedSourceStages(paths);
+  if (profile.sourceTransfer === 'rsync') {
+    const { bsize, bavail } = await fs.statfs(paths.runsDir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT' && paths.runsDir === join(paths.home, 'runs.noindex')) return fs.statfs(paths.home);
+      throw error;
+    });
+    // The copy requires space for the data and filesystem allocation for
+    // small files. A different ship cannot fix a full controller volume.
+    const needed = plan.totalBytes + plan.entries.length * bsize;
+    if (bavail * bsize < needed) {
+      throw usageError(`The Fleet results volume has only ${formatMiB(bavail * bsize)} free. Staging this source needs about ${formatMiB(needed)}. Choose a results folder on a volume with more space.`);
+    }
+  }
+  const runDirectory = await createRunDirectory(paths, jobId);
+  await fs.writeFile(join(runDirectory, 'source-manifest.tsv'), plan.manifestText, { mode: 0o600 });
+  await fs.writeFile(join(runDirectory, 'command.sh'), script, { mode: 0o600 });
   const stdoutLog = createWriteStream(join(runDirectory, 'stdout.log'), { mode: 0o600 });
   const stderrLog = createWriteStream(join(runDirectory, 'stderr.log'), { mode: 0o600 });
 
@@ -235,6 +247,10 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     failure: null as FleetError | null,
     resources: undefined as Receipt['resources'],
   };
+  const logWrites = [stdoutLog, stderrLog].map(stream => finished(stream).then(
+    () => undefined,
+    (error: unknown) => new FleetError('transport', `Could not save the job log in ${runDirectory}: ${String(error)}`),
+  ));
 
   const command = supervisorCommand(machine, { jobId, nonce, timeoutSeconds: profile.timeoutMinutes * 60, label, profile });
   sessionStarting();
@@ -338,8 +354,8 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     // ---- artifacts, cleanup, lock release
     const next = await session.waitFor(['ARTIFACTS', 'BYE'], timing.finishTimeoutMs);
     if (next.word === 'ARTIFACTS') {
-      await session.artifactsWritten();
       try {
+        await session.artifactsWritten();
         const expectedHashes = new Map(session.linesWith('AF').map((line) => {
           const space = line.rest.indexOf(' ');
           return [line.rest.slice(space + 1), line.rest.slice(0, space)] as const;
@@ -374,7 +390,9 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     session.closeInput();
     const exited = await Promise.race([session.exited, delay(30_000).then(() => undefined)]);
     if (exited === undefined) session.kill();
-    await Promise.all([endStream(stdoutLog), endStream(stderrLog)]);
+    stdoutLog.end();
+    stderrLog.end();
+    for (const error of await Promise.all(logWrites)) state.failure ??= error ?? null;
   }
 
   // An interrupted upload can throw before the ordinary RESULT wait. Its
@@ -409,7 +427,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
   if (state.stuck) state.notes.push('job processes did not exit; the lock is kept until they do');
 
   // ---- success and receipt
-  const output = `${readTail(join(runDirectory, 'stdout.log'))}\n${readTail(join(runDirectory, 'stderr.log'))}`;
+  const output = `${await readTail(join(runDirectory, 'stdout.log'))}\n${await readTail(join(runDirectory, 'stderr.log'))}`;
   const success: SuccessEvaluation = evaluateSuccess({
     profile,
     remoteReason: state.reason ?? 'not-run',
@@ -478,8 +496,8 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     missingArtifacts: state.missingArtifacts,
     logs: { stdout: 'stdout.log', stderr: 'stderr.log' },
   };
-  const receiptPath = writeReceipt(runDirectory, receipt);
-  pruneRuns(paths, jobId);
+  const receiptPath = await writeReceipt(runDirectory, receipt);
+  await pruneRuns(paths, jobId);
 
   io.status(summary);
   if (state.failure) for (const detail of state.failure.details) io.status(`  ${detail}`);
@@ -583,19 +601,12 @@ async function upload(transport: Transport, remoteJobDirectory: string, members:
 // Success patterns are matched against at most the last 32 MiB of each log.
 const OUTPUT_TAIL_BYTES = 32 * 1024 * 1024;
 
-function readTail(path: string): string {
+async function readTail(path: string): Promise<string> {
   try {
-    const size = statSync(path).size;
-    if (size <= OUTPUT_TAIL_BYTES) return readFileSync(path, 'utf8');
-    const buffer = readFileSync(path);
-    return buffer.subarray(buffer.length - OUTPUT_TAIL_BYTES).toString('utf8');
+    return (await readLogTail(path, OUTPUT_TAIL_BYTES)).text;
   } catch {
     return '';
   }
-}
-
-function endStream(stream: NodeJS.WritableStream): Promise<void> {
-  return new Promise((resolve) => stream.end(resolve));
 }
 
 function delay(ms: number): Promise<void> {

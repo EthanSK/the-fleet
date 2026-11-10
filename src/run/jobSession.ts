@@ -36,6 +36,7 @@ export class JobSession {
   private artifactPath: string | undefined;
   private artifactResolve: (() => void) | undefined;
   private artifactDone: Promise<void> | undefined;
+  private artifactWriteError: Error | undefined;
   jobEnded = false;
 
   constructor(transport: Transport, command: string, nonce: string, handlers: JobSessionHandlers) {
@@ -66,8 +67,9 @@ export class JobSession {
   }
 
   /** Resolves when the artifact archive has been fully written (or the session ended). */
-  artifactsWritten(): Promise<void> {
-    return this.artifactDone ?? Promise.resolve();
+  async artifactsWritten(): Promise<void> {
+    await this.artifactDone;
+    if (this.artifactWriteError) throw this.artifactWriteError;
   }
 
   send(line: string): void {
@@ -164,7 +166,16 @@ export class JobSession {
     this.artifactDone = new Promise<void>((resolve) => {
       this.artifactResolve = resolve;
     });
-    if (this.artifactPath !== undefined) this.artifactStream = createWriteStream(this.artifactPath, { mode: 0o600 });
+    if (this.artifactPath !== undefined) {
+      this.artifactStream = createWriteStream(this.artifactPath, { mode: 0o600 });
+      // A full controller disk must fail this return and send NACK, rather
+      // than crash the shared coordinator and abandon unrelated jobs.
+      this.artifactStream.once('error', (error: Error) => {
+        this.artifactWriteError = error;
+        this.artifactStream = undefined;
+        this.artifactResolve?.();
+      });
+    }
   }
 
   private connectionLostError(exit: RemoteExit): FleetError {

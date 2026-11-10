@@ -23,7 +23,7 @@ test('rsync staging stays frozen when the original inode grows', async () => {
   } finally { fixture.cleanup(); }
 });
 
-test('abandoned staging is reclaimed without removing live staging or evidence', () => {
+test('abandoned staging is reclaimed without removing live staging or evidence', async () => {
   const fixture = temporaryDirectory();
   const paths = resolveStatePaths({ FLEET_RUNNER_HOME: fixture.path });
   const setup = (name: string, pids: number[]): string => {
@@ -34,11 +34,14 @@ test('abandoned staging is reclaimed without removing live staging or evidence',
   const abandoned = setup('abandoned', [2147483647]);
   const live = setup('live', [process.pid]);
   const reader = setup('reader', [2147483647, process.pid]);
+  const starting = setup('starting', [2147483647]);
+  writeFileSync(join(starting, SOURCE_STAGE_OWNER), JSON.stringify({ pids: [2147483647], startingRsync: true }));
   try {
-    pruneAbandonedSourceStages(paths);
+    await pruneAbandonedSourceStages(paths);
     assert.equal(existsSync(join(abandoned, 'source.noindex')), false);
     assert.equal(readFileSync(join(abandoned, 'stdout.log'), 'utf8'), 'evidence');
     assert.equal(existsSync(join(live, 'source.noindex')), true);
     assert.equal(existsSync(join(reader, 'source.noindex')), true);
+    assert.equal(existsSync(join(starting, 'source.noindex')), true);
   } finally { fixture.cleanup(); }
 });

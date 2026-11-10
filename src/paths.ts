@@ -11,7 +11,7 @@
 // here as independent bounded copies, then removes it. Use the verified
 // external runs override below for large staging.
 
-import { mkdirSync, chmodSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync, statSync, promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { usageError } from './errors.ts';
@@ -54,14 +54,15 @@ export function currentRunsDirectory(paths: StatePaths): string {
 }
 
 /** Validate before writes, without making an unavailable drive hide Settings. */
-export function resolveRunPaths(paths: StatePaths, explicit?: string): StatePaths {
+export async function resolveRunPaths(paths: StatePaths, explicit?: string): Promise<StatePaths> {
   const directory = explicit === undefined ? currentRunsDirectory(paths) : expandHome(explicit);
-  if (directory !== join(paths.home, 'runs.noindex')) validateRunsDirectory(directory);
+  if (directory !== join(paths.home, 'runs.noindex')) await validateRunsDirectory(directory);
   return { ...paths, runsDir: resolve(directory) };
 }
 
-export function validateRunsDirectory(directory: string): void {
-  if (!isAbsolute(directory) || !directory.endsWith('.noindex') || !existsSync(directory) || !statSync(directory).isDirectory()) {
+export async function validateRunsDirectory(directory: string): Promise<void> {
+  if (!isAbsolute(directory) || !directory.endsWith('.noindex')
+    || !(await fs.stat(directory).catch(() => undefined))?.isDirectory()) {
     throw usageError('Choose an existing absolute .noindex directory for returned files.');
   }
 }

@@ -157,12 +157,12 @@ export async function lockCommand(context: CliContext, argv: readonly string[]):
   }
 }
 
-export function resultsCommand(context: CliContext, argv: readonly string[]): number {
+export async function resultsCommand(context: CliContext, argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv, { flags: ['json'], values: ['project', 'limit'] });
   if (args.positionals.length > 1) throw usageError('Usage: fleet-runner results [<job-id>] [--project <project>] [--limit <n>] [--json]');
   const jobId = args.positionals[0];
   if (jobId !== undefined) {
-    const receipt = readReceipt(context.paths, jobId);
+    const receipt = await readReceipt(context.paths, jobId);
     if (args.flags.has('json')) {
       print(context, JSON.stringify(receipt, null, 2));
       return 0;
@@ -183,7 +183,7 @@ export function resultsCommand(context: CliContext, argv: readonly string[]): nu
   const limit = limitText === undefined ? 20 : Number(limitText);
   if (!Number.isInteger(limit) || limit < 1) throw usageError('--limit must be a positive whole number.');
   const project = single(args, 'project');
-  const receipts = listReceipts(context.paths).filter((receipt) => project === undefined || receipt.project === project).slice(0, limit);
+  const receipts = (await listReceipts(context.paths)).filter((receipt) => project === undefined || receipt.project === project).slice(0, limit);
   if (args.flags.has('json')) {
     print(context, JSON.stringify(receipts, null, 2));
     return 0;

@@ -9,10 +9,10 @@
 // Retention is bounded: older finished run folders beyond KEEP_LOCAL_RUNS are
 // removed, and only folders carrying this runner's marker file.
 
-import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { EXIT_CODES, usageError } from '../errors.ts';
-import { ensurePrivateDir, type StatePaths } from '../paths.ts';
+import type { StatePaths } from '../paths.ts';
 import type { GitState } from '../snapshot/gitState.ts';
 import { SOURCE_CHANGED_SUMMARY_SUFFIX } from '../snapshot/readFile.ts';
 import type { ProfileKind } from '../schema/manifest.ts';
@@ -198,26 +198,32 @@ export function outcomeForExitCode(exitCode: number | undefined): RunOutcomeKind
   }
 }
 
-export function createRunDirectory(paths: StatePaths, jobId: string): string {
-  ensurePrivateDir(paths.runsDir);
+export async function createRunDirectory(paths: StatePaths, jobId: string): Promise<string> {
+  // Configured external roots must already exist. A drive can disappear
+  // after admission and must not be recreated on the controller's disk.
+  if (paths.runsDir === join(paths.home, 'runs.noindex')) {
+    await fs.mkdir(paths.runsDir, { recursive: true, mode: 0o700 });
+  }
+  await fs.chmod(paths.runsDir, 0o700);
   const directory = join(paths.runsDir, jobId);
-  ensurePrivateDir(directory);
-  writeFileSync(join(directory, RUN_MARKER), '');
+  await fs.mkdir(directory, { mode: 0o700 });
+  await fs.writeFile(join(directory, RUN_MARKER), '');
   return directory;
 }
 
 /** Reclaim only disposable staging whose recorded local processes are gone. */
-export function pruneAbandonedSourceStages(paths: StatePaths): void {
-  if (!existsSync(paths.runsDir)) return;
-  for (const name of readdirSync(paths.runsDir)) {
+export async function pruneAbandonedSourceStages(paths: StatePaths): Promise<void> {
+  const names = await fs.readdir(paths.runsDir).catch(() => []);
+  for (const name of names) {
     if (!/^[a-z0-9-]+$/.test(name)) continue;
     const directory = join(paths.runsDir, name);
     const ownerPath = join(directory, SOURCE_STAGE_OWNER);
     const sourcePath = join(directory, 'source.noindex');
     try {
-      if (!lstatSync(directory).isDirectory() || !lstatSync(join(directory, RUN_MARKER)).isFile() || !lstatSync(ownerPath).isFile()) continue;
-      const owner: unknown = JSON.parse(readFileSync(ownerPath, 'utf8'));
+      if (!(await fs.lstat(directory)).isDirectory() || !(await fs.lstat(ownerPath)).isFile() || !(await fs.lstat(join(directory, RUN_MARKER))).isFile()) continue;
+      const owner: unknown = JSON.parse(await fs.readFile(ownerPath, 'utf8'));
       if (typeof owner !== 'object' || owner === null || !('pids' in owner) || !Array.isArray(owner.pids) || owner.pids.length === 0) continue;
+      if ('startingRsync' in owner && owner.startingRsync !== false) continue;
       let abandoned = true;
       for (const pid of owner.pids) {
         if (!Number.isSafeInteger(pid) || pid < 1) { abandoned = false; break; }
@@ -227,37 +233,47 @@ export function pruneAbandonedSourceStages(paths: StatePaths): void {
         }
       }
       if (!abandoned) continue;
-      if (existsSync(sourcePath)) {
-        if (!lstatSync(sourcePath).isDirectory()) continue;
-        rmSync(sourcePath, { recursive: true });
+      const source = await fs.lstat(sourcePath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+        return undefined;
+      });
+      if (source) {
+        if (!source.isDirectory()) continue;
+        await fs.rm(sourcePath, { recursive: true, force: true });
       }
-      rmSync(ownerPath);
+      await fs.rm(ownerPath, { force: true });
     } catch { /* Unknown state is kept, never guessed abandoned. */ }
   }
 }
 
-export function writeReceipt(runDirectory: string, receipt: Receipt): string {
+export async function writeReceipt(runDirectory: string, receipt: Receipt): Promise<string> {
   const path = join(runDirectory, 'receipt.json');
-  writeFileSync(path, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+  // Publish the completed receipt atomically so overlapping history scans and
+  // retention cannot treat a half-written run as finished.
+  const temporary = `${path}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(temporary, path);
   return path;
 }
 
-export function readReceipt(paths: StatePaths, jobId: string): Receipt {
+export async function readReceipt(paths: StatePaths, jobId: string): Promise<Receipt> {
   if (!/^[a-z0-9-]+$/.test(jobId)) throw usageError(`"${jobId}" is not a job id.`);
   const path = join(paths.runsDir, jobId, 'receipt.json');
-  if (!existsSync(path)) throw usageError(`No receipt for ${jobId}.`);
-  return JSON.parse(readFileSync(path, 'utf8')) as Receipt;
+  const contents = await fs.readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') throw usageError(`No receipt for ${jobId}.`);
+    throw error;
+  });
+  return JSON.parse(contents) as Receipt;
 }
 
 /** Newest first. Unreadable receipts are skipped rather than failing the listing. */
-export function listReceipts(paths: StatePaths): Receipt[] {
-  if (!existsSync(paths.runsDir)) return [];
+export async function listReceipts(paths: StatePaths, indexed?: ReadonlySet<string>): Promise<Receipt[]> {
+  const names = await fs.readdir(paths.runsDir).catch(() => []);
   const receipts: Receipt[] = [];
-  for (const name of readdirSync(paths.runsDir).sort().reverse()) {
-    const path = join(paths.runsDir, name, 'receipt.json');
-    if (!existsSync(path)) continue;
+  for (const name of names.sort().reverse()) {
+    if (indexed?.has(name) || !/^[a-z0-9-]+$/.test(name)) continue;
     try {
-      receipts.push(JSON.parse(readFileSync(path, 'utf8')) as Receipt);
+      receipts.push(await readReceipt(paths, name));
     } catch {
       // A partially written receipt from an interrupted run.
     }
@@ -265,12 +281,47 @@ export function listReceipts(paths: StatePaths): Receipt[] {
   return receipts;
 }
 
-export function pruneRuns(paths: StatePaths, keepJobId: string): void {
-  if (!existsSync(paths.runsDir)) return;
-  const finished = readdirSync(paths.runsDir)
-    .filter((name) => name !== keepJobId && /^[a-z0-9-]+$/.test(name))
-    .map((name) => join(paths.runsDir, name))
-    .filter((directory) => existsSync(join(directory, RUN_MARKER)) && existsSync(join(directory, 'receipt.json')))
-    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-  for (const directory of finished.slice(KEEP_LOCAL_RUNS)) rmSync(directory, { recursive: true, force: true });
+export async function pruneRuns(paths: StatePaths, keepJobId: string): Promise<void> {
+  const names = await fs.readdir(paths.runsDir).catch(() => []);
+  const finished: { directory: string; modified: number }[] = [];
+  for (const name of names) {
+    if (name === keepJobId || !/^[a-z0-9-]+$/.test(name)) continue;
+    const directory = join(paths.runsDir, name);
+    try {
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory() || !(await fs.lstat(join(directory, RUN_MARKER))).isFile()
+        || !(await fs.lstat(join(directory, 'receipt.json'))).isFile()) continue;
+      finished.push({ directory, modified: stat.mtimeMs });
+    } catch (error) {
+      // A different completion may have already pruned this run.
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error;
+    }
+  }
+  finished.sort((left, right) => right.modified - left.modified);
+  for (const { directory } of finished.slice(KEEP_LOCAL_RUNS)) await fs.rm(directory, { recursive: true, force: true });
+}
+
+/** Read only the requested log tail, leaving other API requests free to run. */
+export async function readLogTail(path: string, maxBytes: number): Promise<{ text: string; bytes: number; truncated: boolean; present: boolean }> {
+  const file = await fs.open(path, 'r').catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+    return undefined;
+  });
+  if (!file) return { text: '', bytes: 0, truncated: false, present: false };
+  try {
+    const { size } = await file.stat();
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const { bytesRead } = await file.read(buffer, read, length - read, size - length + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    let start = 0;
+    while (size > length && start < Math.min(3, read) && ((buffer[start] ?? 0) & 0xc0) === 0x80) start += 1;
+    return { text: buffer.subarray(start, read).toString('utf8'), bytes: size, truncated: size > length, present: true };
+  } finally {
+    await file.close();
+  }
 }

@@ -21,7 +21,7 @@ import { dirname, join, posix } from 'node:path';
 import { FleetError } from '../errors.ts';
 import { isWithin } from './relativePath.ts';
 import type { SnapshotEntry } from './select.ts';
-import { openSnapshotFile, snapshotFileChunks, SourceChangedError } from './readFile.ts';
+import { openSnapshotFile, snapshotFileChunks, verifySnapshotLink } from './readFile.ts';
 export { SourceChangedError } from './readFile.ts';
 
 const BLOCK = 512;
@@ -109,8 +109,7 @@ export async function* tarStream(members: Iterable<TarMember>): AsyncGenerator<B
     }
     const entry = member.entry;
     if (entry.kind === 'symlink') {
-      const current = await fs.readlink(entry.absolutePath).catch(() => undefined);
-      if (current !== entry.linkTarget) throw new SourceChangedError(entry.relativePath);
+      await verifySnapshotLink(entry);
       yield* entryHeaders(member.name, '2', 0o777, 0, entry.mtimeSeconds, entry.linkTarget);
       continue;
     }

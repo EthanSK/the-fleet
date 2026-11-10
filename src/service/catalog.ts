@@ -7,13 +7,13 @@
 // every store it ran into. The index retains only pointers and bounded summary
 // measurements; a missing or pruned receipt is reported as unavailable.
 
-import { closeSync, existsSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync, promises as fs } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { describeSuccess } from '../cli/projectCommands.ts';
 import { usageError } from '../errors.ts';
 import { currentRunsDirectory, ensurePrivateDir, type StatePaths } from '../paths.ts';
 import { listRegistrations, loadMachines, loadProject, type LoadedProject } from '../registry.ts';
-import { classifyRun, isRunAbort, listReceipts, type Receipt, type RunAbort } from '../run/receipt.ts';
+import { classifyRun, isRunAbort, listReceipts, readLogTail, type Receipt, type RunAbort } from '../run/receipt.ts';
 import { getProfile, makeJobId, planRun, type RunResult } from '../run/runJob.ts';
 import { findMachine } from '../schema/machines.ts';
 import { profileWorkload } from '../run/capacity.ts';
@@ -163,9 +163,9 @@ export function recordRun(paths: StatePaths, result: RunResult, context: { reado
   renameSync(temporary, file);
 }
 
-function readReceiptFile(path: string): Receipt | undefined {
+async function readReceiptFile(path: string): Promise<Receipt | undefined> {
   try {
-    const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    const value: unknown = JSON.parse(await fs.readFile(path, 'utf8'));
     if (!value || typeof value !== 'object' || (value as { schemaVersion?: unknown }).schemaVersion !== 1) return undefined;
     const receipt = value as Receipt;
     return typeof receipt.jobId === 'string' && JOB_ID.test(receipt.jobId) ? receipt : undefined;
@@ -217,20 +217,21 @@ function unavailable(entry: RunIndexEntry): Record<string, unknown> {
   };
 }
 
-export function runsView(paths: StatePaths, query: { readonly limit: number; readonly project?: string }): Record<string, unknown> {
-  type Candidate = { jobId: string; finishedAt: string; project: string; load: () => Record<string, unknown> };
+export async function runsView(paths: StatePaths, query: { readonly limit: number; readonly project?: string }): Promise<Record<string, unknown>> {
+  type Candidate = { jobId: string; finishedAt: string; project: string; load: () => Promise<Record<string, unknown>> | Record<string, unknown> };
   const candidates = new Map<string, Candidate>();
   for (const entry of readIndex(paths)) {
     if (candidates.has(entry.jobId)) continue;
-    candidates.set(entry.jobId, { jobId: entry.jobId, finishedAt: entry.finishedAt, project: entry.project, load: () => {
-      const receipt = readReceiptFile(entry.receiptPath);
+    candidates.set(entry.jobId, { jobId: entry.jobId, finishedAt: entry.finishedAt, project: entry.project, load: async () => {
+      const receipt = await readReceiptFile(entry.receiptPath);
       return receipt ? summary(receipt, dirname(entry.receiptPath), entry) : unavailable(entry);
     } });
   }
   // Changing the default results folder must not hide older local receipts.
   const runsDirectory = currentRunsDirectory(paths);
+  const indexed = new Set(candidates.keys());
   for (const root of new Set([runsDirectory, join(paths.home, 'runs.noindex')])) {
-    for (const receipt of listReceipts({ ...paths, runsDir: root })) {
+    for (const receipt of await listReceipts({ ...paths, runsDir: root }, indexed)) {
       if (candidates.has(receipt.jobId) || !JOB_ID.test(receipt.jobId)) continue;
       const directory = join(root, receipt.jobId);
       candidates.set(receipt.jobId, { jobId: receipt.jobId, finishedAt: receipt.timing?.finishedAt ?? '', project: receipt.project, load: () => summary(receipt, directory) });
@@ -240,29 +241,25 @@ export function runsView(paths: StatePaths, query: { readonly limit: number; rea
     .filter((candidate) => query.project === undefined || candidate.project === query.project)
     .sort((left, right) => right.finishedAt.localeCompare(left.finishedAt))
     .slice(0, query.limit);
-  return { runs: selected.map((candidate) => candidate.load()), runsDirectory };
+  // Load only the requested receipt rows, without flooding the shared
+  // filesystem thread pool with a whole history page at once.
+  const runs = [];
+  for (const candidate of selected) runs.push(await candidate.load());
+  return { runs, runsDirectory };
 }
 
-function tail(path: string, maxBytes: number): Record<string, unknown> {
-  if (!existsSync(path)) return { text: '', bytes: 0, truncated: false, present: false };
-  const size = statSync(path).size;
-  const length = Math.min(size, maxBytes);
-  const buffer = Buffer.alloc(length);
-  const descriptor = openSync(path, 'r');
-  try { readSync(descriptor, buffer, 0, length, size - length); }
-  finally { closeSync(descriptor); }
-  // Skip a partial UTF-8 sequence where the tail starts mid-character.
-  let start = 0;
-  while (size > length && start < Math.min(3, buffer.length) && ((buffer[start] ?? 0) & 0xc0) === 0x80) start += 1;
-  return { text: buffer.subarray(start).toString('utf8'), bytes: size, truncated: size > length, present: true };
-}
-
-export function runDetailView(paths: StatePaths, jobId: string, tailBytes: number): Record<string, unknown> {
+export async function runDetailView(paths: StatePaths, jobId: string, tailBytes: number): Promise<Record<string, unknown>> {
   if (!JOB_ID.test(jobId)) throw usageError(`"${jobId}" is not a job id.`);
   const entry = readIndex(paths).find((candidate) => candidate.jobId === jobId);
-  const roots = [currentRunsDirectory(paths), join(paths.home, 'runs.noindex')];
-  const directory = entry ? dirname(entry.receiptPath) : join(roots.find(root => existsSync(join(root, jobId, 'receipt.json'))) ?? roots[0] ?? paths.runsDir, jobId);
-  const receipt = readReceiptFile(join(directory, 'receipt.json'));
+  let directory = entry ? dirname(entry.receiptPath) : join(currentRunsDirectory(paths), jobId);
+  let receipt = await readReceiptFile(join(directory, 'receipt.json'));
+  if (!receipt && !entry) {
+    const legacyDirectory = join(paths.home, 'runs.noindex', jobId);
+    if (legacyDirectory !== directory) {
+      directory = legacyDirectory;
+      receipt = await readReceiptFile(join(directory, 'receipt.json'));
+    }
+  }
   if (!receipt) {
     if (!entry) throw notFound(`No receipt for ${jobId}.`);
     return { jobId, available: false, directory, run: unavailable(entry) };
@@ -275,8 +272,8 @@ export function runDetailView(paths: StatePaths, jobId: string, tailBytes: numbe
     run: summary(receipt, directory, entry),
     receipt,
     logs: {
-      stdout: tail(join(directory, logName(receipt.logs?.stdout, 'stdout.log')), tailBytes),
-      stderr: tail(join(directory, logName(receipt.logs?.stderr, 'stderr.log')), tailBytes),
+      stdout: await readLogTail(join(directory, logName(receipt.logs?.stdout, 'stdout.log')), tailBytes),
+      stderr: await readLogTail(join(directory, logName(receipt.logs?.stderr, 'stderr.log')), tailBytes),
     },
   };
 }

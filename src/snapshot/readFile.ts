@@ -28,6 +28,12 @@ export class SourceChangedError extends FleetError {
   }
 }
 
+/** Refuse a link that no longer points at its planned relative target. */
+export async function verifySnapshotLink(entry: Extract<SnapshotEntry, { kind: 'symlink' }>): Promise<void> {
+  const current = await fs.readlink(entry.absolutePath).catch(() => undefined);
+  if (current !== entry.linkTarget) throw new SourceChangedError(entry.relativePath);
+}
+
 /** Extraction of streamSnapshotFile's open/identity checks; caller closes it. */
 export async function openSnapshotFile(entry: FileEntry): Promise<FileHandle> {
   let handle: FileHandle;
@@ -35,7 +41,8 @@ export async function openSnapshotFile(entry: FileEntry): Promise<FileHandle> {
   catch { throw new SourceChangedError(entry.relativePath); }
   try {
     const stats = await handle.stat();
-    if (stats.ino !== entry.inode || stats.dev !== entry.device || stats.size !== entry.size) throw new SourceChangedError(entry.relativePath);
+    if (!stats.isFile() || stats.ino !== entry.inode || stats.dev !== entry.device
+      || stats.size !== entry.size || (stats.mode & 0o777) !== entry.mode) throw new SourceChangedError(entry.relativePath);
     return handle;
   } catch (error) {
     await handle.close();

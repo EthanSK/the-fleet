@@ -137,7 +137,7 @@ test('unavailable configured results drive blocks writes while settings stay acc
     const initial = (await f.call('GET', '/v1/config')).body['controller']; assert.ok(initial && typeof initial === 'object' && 'revision' in initial);
     assert.equal((await f.call('PUT', '/v1/config/controller', { revision: initial.revision, runsDirectory: folder })).status, 200);
     rmSync(folder, { recursive: true });
-    assert.throws(() => resolveRunPaths(f.paths), /existing absolute/);
+    await assert.rejects(resolveRunPaths(f.paths), /existing absolute/);
     const current = await f.call('GET', '/v1/config'); assert.equal(current.status, 200);
     assert.deepEqual(current.body['paths'], { home: f.paths.home, machinesFile: f.paths.machinesFile, runsDirectory: folder });
     assert.equal(resolveStatePaths({ THE_FLEET_HOME: f.root }).runsDir, folder);
@@ -152,8 +152,8 @@ test('explicit request and environment destinations precede the controller prefe
     const [central = '', environment = '', request = ''] = folders;
     writeFileSync(join(f.root, 'settings.json'), JSON.stringify({ schemaVersion: 1, runsDirectory: central }));
     const paths = resolveStatePaths({ THE_FLEET_HOME: f.root, THE_FLEET_RUNS_DIRECTORY: environment });
-    assert.equal(resolveRunPaths(paths).runsDir, environment);
-    assert.equal(resolveRunPaths(paths, request).runsDir, request);
+    assert.equal((await resolveRunPaths(paths)).runsDir, environment);
+    assert.equal((await resolveRunPaths(paths, request)).runsDir, request);
   } finally { await f.close(); }
 });
 

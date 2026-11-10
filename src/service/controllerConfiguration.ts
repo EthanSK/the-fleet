@@ -10,17 +10,21 @@ export function controllerConfigurationView(paths: StatePaths): Record<string, u
   return { revision: controllerSettingsRevision(paths.home), runsDirectory: readControllerSettings(paths.home).runsDirectory ?? null };
 }
 
-export function editControllerConfiguration(paths: StatePaths, value: unknown): void {
+export async function editControllerConfiguration(paths: StatePaths, value: unknown): Promise<void> {
   const reader = new Reader('controller settings');
   const input = reader.object(value, ['revision', 'runsDirectory']);
   const revision = reader.child('revision').string(input['revision']);
-  const current = controllerSettingsRevision(paths.home);
-  if (revision !== current) throw new ApiError(409, 'revision-conflict', 'These settings changed somewhere else. Reload them and try again.', { revision: current });
+  const assertRevision = (): void => {
+    const current = controllerSettingsRevision(paths.home);
+    if (revision !== current) throw new ApiError(409, 'revision-conflict', 'These settings changed somewhere else. Reload them and try again.', { revision: current });
+  };
+  assertRevision();
   if (input['runsDirectory'] === null) {
     saveControllerSettings(paths.home, { schemaVersion: 1 });
     return;
   }
   const directory = expandHome(reader.child('runsDirectory').string(input['runsDirectory']));
-  validateRunsDirectory(directory);
+  await validateRunsDirectory(directory);
+  assertRevision();
   saveControllerSettings(paths.home, { schemaVersion: 1, runsDirectory: resolve(directory) });
 }

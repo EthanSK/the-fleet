@@ -3,7 +3,7 @@
 // lifecycle, abandonment sweep and receipt index are the real ones.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,37 @@ import { registerProject } from '../src/registry.ts';
 import { recordRun } from '../src/service/catalog.ts';
 import type { RunRequest, RunResult } from '../src/run/runJob.ts';
 import { report, startServiceFixture, writeRun, type ServiceFixture } from './helpers/serviceFixture.ts';
+
+test('a slow history receipt leaves health, state and operation requests responsive', { timeout: 5_000 }, async (context) => {
+  const f = await startServiceFixture();
+  let signalReceiptRead!: () => void;
+  let releaseDisk!: () => void;
+  const receiptReadStarted = new Promise<void>(resolve => { signalReceiptRead = resolve; });
+  const diskReady = new Promise<void>(resolve => { releaseDisk = resolve; });
+  const result = writeRun(f.paths.runsDir, '20261110-slow-receipt-fixture');
+  recordRun(f.paths, result, { operationId: 'fixture', owner: 'history-test' });
+  const readFile = fs.readFile;
+  context.mock.method(fs, 'readFile', async (...args: Parameters<typeof readFile>) => {
+    if (args[0] === result.receiptPath) {
+      signalReceiptRead();
+      await diskReady;
+    }
+    return readFile(...args);
+  });
+  const history = f.call('GET', '/v1/runs?limit=1');
+  try {
+    await receiptReadStarted;
+    assert.equal((await f.call('GET', '/v1/health')).status, 200);
+    assert.equal((await f.call('GET', '/v1/state')).status, 200);
+    assert.equal((await f.call('GET', '/v1/operations')).status, 200);
+  } finally {
+    releaseDisk();
+    const reply = await history;
+    assert.equal(reply.status, 200);
+    assert.equal((reply.body['runs'] as { jobId: string }[])[0]?.jobId, result.receipt.jobId);
+    await f.close();
+  }
+});
 
 function registerExample(f: ServiceFixture): void {
   const source = join(f.root, 'example'); mkdirSync(source, { recursive: true });
