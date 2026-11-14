@@ -19,6 +19,7 @@ import type { Machine } from '../schema/machines.ts';
 import { loadAgentBridgeRoute, type AgentBridgeRoute } from './agentBridgeConfig.ts';
 import { wrapChild, type RemoteExit, type RemoteProcess, type Transport } from './transport.ts';
 import { shellQuote } from './shellQuote.ts';
+import { rsyncFileCacheArguments } from './rsyncArguments.ts';
 
 // Client-side connection failure phrases, matching agent-bridge's
 // _ssh_is_connection_failure. Exit 255 alone is ambiguous: the remote command
@@ -77,7 +78,7 @@ export class SshTransport implements Transport {
     // Only the private selected-source directory is traversed recursively.
     const rsh = [process.execPath, fileURLToPath(new URL('./rsyncSsh.ts', import.meta.url))].map(shellQuote).join(' ');
     return wrapChild(spawn('/usr/bin/rsync', [
-      '-rlptc', '--delete', '--stats', '--no-owner', '--no-group',
+      '-rlptc', '--delete', '--stats', '--no-owner', '--no-group', ...rsyncFileCacheArguments(),
       '-e', rsh, '--rsync-path', 'fleet-runner-receiver',
       `${sourceDirectory}/`, 'fleet-worker:fleet-runner-source',
     ], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FLEET_RUNNER_RSYNC_SSH_ARGS: JSON.stringify(sshArguments(this.route)), FLEET_RUNNER_RSYNC_RECEIVER: receiverCommand } }));

@@ -280,9 +280,14 @@ particular job even when a slot is free.
 
 A named cache remains serialized unless its owner explicitly sets
 `cache.concurrent: true` after checking its tools support simultaneous use.
-Concurrent users can share the same cache name. Mutable rsync source sync,
-verification and materialization are serialized per cache/project; execution
-uses an independent copy. Cache usage stays protected through uploads and job
+Concurrent users can share the same cache name. Mutable retained rsync source
+is guarded per cache/project. When a concurrent upload finds that copy busy,
+it uses the existing disposable job source instead of waiting; a full cache
+uses the same fallback. This may send a full source copy instead of a warm
+delta. Execution always uses an independent verified copy. On Apple rsync,
+the sender uses the OS file cache when supported, keeping checksum reads of
+external scratch fast; older/GNU receivers keep their existing options.
+Cache usage stays protected through uploads and job
 children. Post-job retention can evict an over-limit cache only after its last
 user leaves; the limit is a retention cap, not a hard concurrent disk quota.
 Use immutable/versioned executable paths or setup-only locks when two versions

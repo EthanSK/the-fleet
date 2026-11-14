@@ -1,17 +1,19 @@
 // Real rsync protocol and supervisor tests: retained source remains separate
 // from execution and command/env data, with exact files and bounded ownership.
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { loadProject, registerProject } from '../src/registry.ts';
 import { parseManifest } from '../src/schema/manifest.ts';
 import { Interrupts, runProfile } from '../src/run/runJob.ts';
 import { fetchStatus } from '../src/run/remoteChecks.ts';
 import { testEnvironment, testMachine, waitUntil, writeFiles } from './helpers/fixtures.ts';
 import { RsyncTransport } from './helpers/rsyncTransport.ts';
+import { rsyncFileCacheArguments } from '../src/transport/rsyncArguments.ts';
 
 function setup(command = 'echo tests 1', extra: Record<string, unknown> = {}) {
   const env = testEnvironment();
@@ -89,6 +91,73 @@ test('rsync preserves quotes and spaces in the configured remote root', { timeou
     assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
     assert.equal(run.receipt.remote.lockReleased, true);
   } finally { fixture.env.cleanup(); }
+});
+
+test('native sender caching preserves receiver compatibility', { timeout: 30000, skip: !rsyncFileCacheArguments().includes('--cache') }, async () => {
+  const fixture = setup();
+  const receiver = join(fixture.env.root, 'receiver-without-cache-option');
+  writeFileSync(receiver, '#!/bin/sh\nfor argument; do [ "$argument" != --cache ] || exit 64; done\necho invoked > "$0.invoked"\nexec /usr/bin/rsync "$@"\n', { mode: 0o700 });
+  fixture.transport.beforeSync = () => {
+    const jobs = join(fixture.env.remoteRoot, 'jobs');
+    const job = readdirSync(jobs).find((name) => existsSync(join(jobs, name, 'meta/rsync-worker.py')));
+    assert.ok(job);
+    const worker = join(jobs, job, 'meta/rsync-worker.py');
+    const original = readFileSync(worker, 'utf8');
+    assert.ok(original.includes("['/usr/bin/rsync', *receiver_arguments"));
+    writeFileSync(worker, original.replace("['/usr/bin/rsync', *receiver_arguments", `[${JSON.stringify(receiver)}, *receiver_arguments`));
+  };
+  try {
+    const run = await runProfile(fixture.request);
+    assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(run.receipt.remote.processesRemaining, false);
+    assert.equal(readFileSync(`${receiver}.invoked`, 'utf8').trim(), 'invoked');
+  } finally { fixture.env.cleanup(); }
+});
+
+test('concurrent source sync uses private scratch while a peer owns the retained source', { timeout: 30000 }, async () => {
+  const fixture = setup('echo tests 1', { cache: { name: 'shared-fixture', maxGiB: 0.1, concurrent: true } });
+  const sourceGuard = join(fixture.env.remoteRoot, 'locks', 'source-' + createHash('sha256').update('shared-fixture/rsync-fixture').digest('hex'));
+  writeFiles(fixture.owner, { '.fleet-source': 'rsync-fixture', 'tree/peer.txt': 'peer source stays unchanged' });
+  mkdirSync(join(fixture.env.remoteRoot, 'locks'), { recursive: true });
+  const holder = spawn('python3', ['-B', '-c',
+    'import fcntl,sys\nwith open(sys.argv[1],"a") as guard:\n fcntl.flock(guard,fcntl.LOCK_EX)\n print("held",flush=True)\n sys.stdin.read()\n',
+    sourceGuard], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const holderExited = once(holder, 'exit');
+  holder.stderr.resume();
+  try {
+    const [ready] = await Promise.race([once(holder.stdout, 'data'),
+      holderExited.then(() => { throw new Error('source lock holder exited before readiness'); })]);
+    assert.equal(String(ready).trim(), 'held');
+    const machine = testMachine();
+    const run = await runProfile({ ...fixture.request, machine: { ...machine,
+      limits: { ...machine.limits, uploadTimeoutMinutes: 0.2 } } });
+    assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(run.receipt.remote.processesRemaining, false);
+    assert.equal(readFileSync(join(fixture.tree, 'peer.txt'), 'utf8'), 'peer source stays unchanged');
+    assert.deepEqual(readdirSync(fixture.tree), ['peer.txt']);
+    assert.match(readFileSync(join(run.receiptPath, '..', 'rsync.log'), 'utf8'), /source cache busy; using disposable job source/);
+    assert.equal(holder.exitCode, null, 'the other source owner must remain alive');
+
+    fixture.transport.extraArguments.push('--bwlimit=128');
+    writeFileSync(join(fixture.source, 'large.dat'), randomBytes(2 * 1024 * 1024));
+    const pending = runProfile(fixture.request);
+    const jobs = join(fixture.env.remoteRoot, 'jobs');
+    assert.equal(await waitUntil(() => readdirSync(jobs).some((job) => existsSync(join(jobs, job, 'source-rsync.dirty'))), 10000), true);
+    fixture.interrupts.trigger();
+    const cancelled = await pending;
+    assert.equal(cancelled.receipt.outcome, 'cancelled', JSON.stringify(cancelled.receipt));
+    assert.equal(cancelled.receipt.remote.lockReleased, true);
+    assert.equal(cancelled.receipt.remote.processesRemaining, false);
+    assert.equal(cancelled.receipt.timing.remoteStartedAt, null);
+    assert.equal(readFileSync(join(fixture.tree, 'peer.txt'), 'utf8'), 'peer source stays unchanged');
+    assert.equal(holder.exitCode, null);
+  } finally {
+    holder.stdin.end();
+    await holderExited;
+    fixture.env.cleanup();
+  }
 });
 
 test('rsync cold and warm runs isolate execution and never retain job env', { timeout: 30000 }, async () => {
