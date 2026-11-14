@@ -141,13 +141,36 @@ test('rejected artifact cannot be counted as returned', { timeout: 30000 }, asyn
   } finally { env.cleanup(); }
 });
 
-test('sparse artifacts are bounded by logical size before transfer', { timeout: 30000 }, async () => {
+test('oversized sparse artifacts retain their only source copy and ownership before transfer', { timeout: 30000 }, async () => {
   const { env, request } = setup("python3 -c \"with open('sparse.bin','wb') as f: f.truncate(2*1024*1024)\"; echo tests 1", { artifacts: ['sparse.bin'], maxArtifactMiB: 1 });
   try {
     const run = await runProfile(request);
-    assert.equal(run.receipt.outcome, 'failed');
+    assert.equal(run.receipt.outcome, 'error');
     assert.ok(run.receipt.remote.notes.some((note) => note.includes('exceed')));
     assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), false);
+    const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
+    assert.equal(existsSync(join(directory, 'src/sparse.bin')), true);
+    assert.equal(run.receipt.remote.lockReleased, false);
+    assert.equal((await runControl(env.transport, testMachine(), 'clear-stale')).result, 'artifact-capture-failed');
+    assert.equal(existsSync(join(directory, 'src/sparse.bin')), true);
+  } finally { env.cleanup(); }
+});
+
+test('oversized ordinary reports recover after an inspected budget increase without replaying the command', { timeout: 30000 }, async () => {
+  const { env, request } = setup("python3 -c \"open('report.txt','wb').write(b'x'*(2*1024*1024))\"; echo tests 1; exit 7", { artifacts: ['report.txt'], maxArtifactMiB: 1 });
+  try {
+    const run = await runProfile(request);
+    const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
+    const originalResult = readFileSync(join(directory, 'result'), 'utf8');
+    assert.equal(run.receipt.outcome, 'error');
+    assert.equal(run.receipt.remote.exitCode, 7);
+    assert.equal(readFileSync(join(directory, 'src/report.txt')).length, 2 * 1024 * 1024);
+    writeFileSync(join(directory, 'meta/max-artifact-kb'), '4096\n');
+    assert.equal((await runControl(env.transport, testMachine(), 'clear-stale')).result, 'cleared');
+    const recovered = await recoverArtifacts(env.paths, env.transport, testMachine(), run.receipt.jobId);
+    assert.equal(readFileSync(join(recovered, 'report.txt')).equals(Buffer.alloc(2 * 1024 * 1024, 'x')), true);
+    assert.equal(readFileSync(join(directory, 'result'), 'utf8'), originalResult);
+    assert.equal(JSON.parse(readFileSync(run.receiptPath, 'utf8')).outcome, 'error');
   } finally { env.cleanup(); }
 });
 

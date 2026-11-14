@@ -411,6 +411,12 @@ to recovered artifacts. Paths, sizes and content hashes are still checked;
 malformed or unrepresentable timestamps are rejected. Directory and symlink
 timestamps are not restored.
 
+If declared output exceeds a profile's `maxArtifactMiB`, no archive is sent.
+The original output and job ownership are retained for inspection and explicit
+recovery instead of deleting the only report copy. The original command is
+not replayed, and its result remains recorded. Other jobs sharing that resource
+may wait until the retained output and ownership are resolved.
+
 ## Large temporary output archives
 
 Project `the-fleet.json` files describe jobs. Personal ship locations and devices
