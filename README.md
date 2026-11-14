@@ -256,6 +256,13 @@ separate ceiling. E2E jobs still consume an ordinary slot as well; both limits
 must have room. The coordinator and inherited remote kernel locks enforce them.
 State exposes the E2E limit and usage under `capacity.e2e`.
 
+Shared managed jobs receive `FLEET_RUNNER_JOB_SLOT`, the one-based ordinary
+slot held by the existing remote kernel guard. Simultaneous jobs on that ship
+have different slot numbers; a released slot can be reused. Clients can derive
+their existing indexed runtime ports from it without adding a second capacity
+setting. It is an active-job identity, not a persistent reservation after a
+failed cleanup; clients must retain their normal runtime ownership checks.
+
 Profiles and one-time requests accept `workload: "e2e"` or `"standard"`.
 Without an override, familiar `e2e`, `playwright` and `cypress` tokens in the
 profile name or command select the E2E budget. For opaque scripts or dynamically

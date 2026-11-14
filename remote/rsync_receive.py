@@ -7,21 +7,29 @@ import signal
 import subprocess
 import sys
 import time
+from typing import NoReturn
+
+def refuse(message: str, code: int = 73) -> NoReturn:
+    # Quiet exits otherwise leave the caller only rsync's unexpected EOF.
+    print('fleet-runner: rsync receiver ' + message, file=sys.stderr, flush=True)
+    sys.exit(code)
 
 job, worker, *arguments = sys.argv[1:]
 if not os.path.isabs(job) or os.path.islink(job) or not os.path.isfile(os.path.join(job, '.fleet-job')):
-    sys.exit(73)
+    refuse('refused an invalid job directory')
 guard = os.open(os.path.join(job, 'upload.guard'), os.O_CREAT | os.O_RDWR, 0o600)
 try:
     fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    sys.exit(75)
+    refuse('upload guard is already held', 75)
 
 def terminal():
     return any(os.path.exists(os.path.join(job, name)) for name in ('result', 'cancel-requested', 'src'))
 
-if terminal() or not os.path.isdir(os.path.join(job, 'meta')):
-    sys.exit(73)
+if terminal():
+    refuse('job is terminal or source is already present')
+if not os.path.isdir(os.path.join(job, 'meta')):
+    refuse('metadata directory is missing')
 cancelled = False
 
 def interrupt(signum, frame):
@@ -31,7 +39,7 @@ def interrupt(signum, frame):
 for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
     signal.signal(signum, interrupt)
 if worker != os.path.join(job, 'meta', 'rsync-worker.py') or os.path.islink(worker):
-    sys.exit(73)
+    refuse('worker path is invalid')
 child = subprocess.Popen([sys.executable, worker, job, str(guard), *arguments], start_new_session=True, pass_fds=(guard,))
 owner = os.path.join(job, 'upload.owner')
 started = ' '.join(subprocess.run(['ps', '-o', 'lstart=', '-p', str(child.pid)], text=True, capture_output=True).stdout.split())
@@ -57,6 +65,8 @@ try:
                 child.wait()
             sys.exit(1)
         time.sleep(0.1)
+    if child.returncode < 0:
+        print('fleet-runner: rsync receiver worker ended with signal %s' % -child.returncode, file=sys.stderr, flush=True)
     sys.exit(child.returncode if child.returncode >= 0 else 1)
 finally:
     # The worker can fail while its rsync child is still alive. Keep the guard
