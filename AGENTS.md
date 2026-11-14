@@ -11,3 +11,7 @@ Validate changes with npm run typecheck and meaningful focused tests. For lifecy
 New generic projects should register suitable real automated tests and try the available fleet first. Do not add toy tests merely to satisfy registration. Project adapter commands and selected paths must come from their actual owning source; a registration is not execution evidence.
 
 The Fleet is generic. Keep personal app adapters and worker guidance outside this repository. All normal CLI and Agent Bridge operations must share the local coordinator; direct SSH is allowed after centrally reserving capacity. Saved profiles are optional. Keep old protocol/path names stable where changing them would break existing workers.
+
+## Capacity philosophy
+
+Push the fleet to the max, then only start limiting it once we have actually witnessed problems. Prefer measured failures over assumed hardware budgets or constrained system reports when setting concurrency. Fix the actual bottleneck, distinguish real shared-resource conflicts from job-count limits, and record the evidence behind any restriction. Preserve admitted jobs and persistent data while making capacity changes. User-requested — 2026-11-14.
