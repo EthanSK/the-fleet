@@ -43,8 +43,22 @@ test('real supervisor returns verified artifacts, stderr and cleanup', { timeout
     assert.match(env.stderr.text, /diagnostic/);
     assert.equal(run.receipt.artifacts.length, 1);
     assert.equal(readFileSync(join(run.receiptPath, '..', 'artifacts', 'result.txt'), 'utf8'), 'result\n');
+    assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), false, 'verified normal return must remove its redundant transfer archive');
     assert.equal(existsSync(join(env.remoteRoot, 'locks', 'heavy')), false);
     assert.equal(existsSync(join(env.remoteRoot, 'jobs', run.receipt.jobId, 'src')), false);
+  } finally { env.cleanup(); }
+});
+
+test('verified failed-job reports survive without retaining the redundant transport archive', { timeout: 30000 }, async () => {
+  const { env, request } = setup('echo tests 3; echo failure-details > result.txt; exit 7', { artifacts: ['result.txt'] });
+  try {
+    const run = await runProfile(request);
+    assert.equal(run.receipt.outcome, 'failed');
+    assert.equal(run.receipt.remote.exitCode, 7);
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(readFileSync(join(run.receiptPath, '..', 'artifacts', 'result.txt'), 'utf8'), 'failure-details\n');
+    assert.equal(existsSync(run.receiptPath), true);
+    assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), false);
   } finally { env.cleanup(); }
 });
 
@@ -141,45 +155,64 @@ test('rejected artifact cannot be counted as returned', { timeout: 30000 }, asyn
   } finally { env.cleanup(); }
 });
 
-test('sparse artifacts are bounded by logical size before transfer', { timeout: 30000 }, async () => {
+test('oversized sparse artifacts retain their only source copy and ownership before transfer', { timeout: 30000 }, async () => {
   const { env, request } = setup("python3 -c \"with open('sparse.bin','wb') as f: f.truncate(2*1024*1024)\"; echo tests 1", { artifacts: ['sparse.bin'], maxArtifactMiB: 1 });
   try {
     const run = await runProfile(request);
-    assert.equal(run.receipt.outcome, 'failed');
+    assert.equal(run.receipt.outcome, 'error');
     assert.ok(run.receipt.remote.notes.some((note) => note.includes('exceed')));
     assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), false);
+    const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
+    assert.equal(existsSync(join(directory, 'src/sparse.bin')), true);
+    assert.equal(run.receipt.remote.lockReleased, false);
+    assert.equal((await runControl(env.transport, testMachine(), 'clear-stale')).result, 'artifact-capture-failed');
+    assert.equal(existsSync(join(directory, 'src/sparse.bin')), true);
+  } finally { env.cleanup(); }
+});
+
+test('oversized ordinary reports recover after an inspected budget increase without replaying the command', { timeout: 30000 }, async () => {
+  const { env, request } = setup("python3 -c \"open('report.txt','wb').write(b'x'*(2*1024*1024))\"; echo tests 1; exit 7", { artifacts: ['report.txt'], maxArtifactMiB: 1 });
+  try {
+    const run = await runProfile(request);
+    const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
+    const originalResult = readFileSync(join(directory, 'result'), 'utf8');
+    assert.equal(run.receipt.outcome, 'error');
+    assert.equal(run.receipt.remote.exitCode, 7);
+    assert.equal(readFileSync(join(directory, 'src/report.txt')).length, 2 * 1024 * 1024);
+    writeFileSync(join(directory, 'meta/max-artifact-kb'), '4096\n');
+    assert.equal((await runControl(env.transport, testMachine(), 'clear-stale')).result, 'cleared');
+    const recovered = await recoverArtifacts(env.paths, env.transport, testMachine(), run.receipt.jobId);
+    assert.equal(readFileSync(join(recovered, 'report.txt')).equals(Buffer.alloc(2 * 1024 * 1024, 'x')), true);
+    assert.equal(readFileSync(join(directory, 'result'), 'utf8'), originalResult);
+    assert.equal(JSON.parse(readFileSync(run.receiptPath, 'utf8')).outcome, 'error');
   } finally { env.cleanup(); }
 });
 
 
 test('lost cleanup confirmation cannot produce a passed receipt', { timeout: 30000 }, async () => {
-  const { env, request } = setup('echo tests 1');
+  const { env, request } = setup('echo result > result.txt; echo tests 1', { artifacts: ['result.txt'] });
   const transport = {
     description: env.transport.description,
     isConnectionFailure: () => false,
     start: (command: string) => {
-      const remote = env.transport.start(command);
-      if (!command.includes('fleet-runner-supervisor')) return remote;
-      let pending = '';
-      const filtered = new Transform({ transform(chunk, _encoding, done) {
-        pending += chunk.toString();
-        for (;;) {
-          const newline = pending.indexOf('\n');
-          if (newline < 0) break;
-          const line = pending.slice(0, newline + 1);
-          pending = pending.slice(newline + 1);
-          if (!line.startsWith('@@FR RELEASED') && !line.startsWith('@@FR BYE')) this.push(line);
+      if (command.includes('fleet-runner-supervisor')) {
+        // Suppress only protocol confirmations in the inline script. A line
+        // filter would buffer binary tar padding while the worker awaits ACK.
+        for (const word of ['RELEASED', 'BYE']) {
+          const fragment = shellQuote(`fr_proto '${word}'`).slice(1, -1);
+          assert.ok(command.includes(fragment));
+          command = command.replace(fragment, ':');
         }
-        done();
-      }});
-      remote.stdout.pipe(filtered);
-      return { ...remote, stdout: filtered };
+      }
+      return env.transport.start(command);
     },
   };
   try {
     const run = await runProfile({ ...request, transport });
     assert.equal(run.receipt.outcome, 'error');
     assert.notEqual(run.exitCode, 0);
+    assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), true, 'uncertain completion retains the verified transport copy');
+    assert.equal(readFileSync(join(run.receiptPath, '..', 'artifacts', 'result.txt'), 'utf8'), 'result\n');
   } finally { env.cleanup(); }
 });
 
@@ -453,6 +486,7 @@ test('verification failure retains the only remote archive until verified recove
     const run = await runProfile({ ...request, transport });
     const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
     assert.equal(run.exitCode, 8, JSON.stringify(run.receipt));
+    assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), true, 'hash failure retains the unverified local archive');
     assert.equal(run.receipt.outcome, 'error', 'a hash mismatch is a verification error, never a job result');
     assert.equal(existsSync(join(directory, 'artifacts.pending')), true);
     assert.equal(existsSync(join(directory, 'artifacts.tar')), true);
@@ -500,6 +534,7 @@ test('EOF after artifact transfer does not acknowledge verified return', { timeo
   try {
     const run = await runProfile({ ...request, transport });
     const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
+    assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), true, 'an uncertain ACK retains the local archive');
     assert.equal(existsSync(join(directory, 'artifacts.pending')), true);
     assert.equal(existsSync(join(directory, 'artifacts.tar')), true);
     const recovered = await recoverArtifacts(env.paths, env.transport, testMachine(), run.receipt.jobId);

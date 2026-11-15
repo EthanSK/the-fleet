@@ -351,7 +351,9 @@ PY
   [ "$#" -gt 0 ] || return 0
   if [ "$_total_kb" -gt "$_max_kb" ]; then
     fr_capture_notice "ARTIFACTS-TOO-LARGE $_total_kb"
-    return 1
+    # The report has no archive yet. Reuse capture-failure retention so normal
+    # cleanup cannot delete its only copy; explicit recovery retains the cap.
+    return 73
   fi
   _sha=$(fr_sha256_cmd)
   # "hash  path" lines; shasum prefixes "\" when a name needs escaping, and

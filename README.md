@@ -256,6 +256,13 @@ separate ceiling. E2E jobs still consume an ordinary slot as well; both limits
 must have room. The coordinator and inherited remote kernel locks enforce them.
 State exposes the E2E limit and usage under `capacity.e2e`.
 
+Shared managed jobs receive `FLEET_RUNNER_JOB_SLOT`, the one-based ordinary
+slot held by the existing remote kernel guard. Simultaneous jobs on that ship
+have different slot numbers; a released slot can be reused. Clients can derive
+their existing indexed runtime ports from it without adding a second capacity
+setting. It is an active-job identity, not a persistent reservation after a
+failed cleanup; clients must retain their normal runtime ownership checks.
+
 Profiles and one-time requests accept `workload: "e2e"` or `"standard"`.
 Without an override, familiar `e2e`, `playwright` and `cypress` tokens in the
 profile name or command select the E2E budget. For opaque scripts or dynamically
@@ -273,9 +280,14 @@ particular job even when a slot is free.
 
 A named cache remains serialized unless its owner explicitly sets
 `cache.concurrent: true` after checking its tools support simultaneous use.
-Concurrent users can share the same cache name. Mutable rsync source sync,
-verification and materialization are serialized per cache/project; execution
-uses an independent copy. Cache usage stays protected through uploads and job
+Concurrent users can share the same cache name. Mutable retained rsync source
+is guarded per cache/project. When a concurrent upload finds that copy busy,
+it uses the existing disposable job source instead of waiting; a full cache
+uses the same fallback. This may send a full source copy instead of a warm
+delta. Execution always uses an independent verified copy. On Apple rsync,
+the sender uses the OS file cache when supported, keeping checksum reads of
+external scratch fast; older/GNU receivers keep their existing options.
+Cache usage stays protected through uploads and job
 children. Post-job retention can evict an over-limit cache only after its last
 user leaves; the limit is a retention cap, not a hard concurrent disk quota.
 Use immutable/versioned executable paths or setup-only locks when two versions
@@ -440,6 +452,12 @@ precision supported by Node and the destination filesystem. This also applies
 to recovered artifacts. Paths, sizes and content hashes are still checked;
 malformed or unrepresentable timestamps are rejected. Directory and symlink
 timestamps are not restored.
+
+If declared output exceeds a profile's `maxArtifactMiB`, no archive is sent.
+The original output and job ownership are retained for inspection and explicit
+recovery instead of deleting the only report copy. The original command is
+not replayed, and its result remains recorded. Other jobs sharing that resource
+may wait until the retained output and ownership are resolved.
 
 ## Large temporary output archives
 

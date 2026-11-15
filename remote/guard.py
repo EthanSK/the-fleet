@@ -37,6 +37,7 @@ os.environ.pop('FR_JOB_LOCK', None)
 os.environ.pop('FLEET_RUNNER_SHARED_JOB', None)
 os.environ.pop('FLEET_RUNNER_CLAIM_CACHE', None)
 os.environ.pop('FLEET_RUNNER_WORKLOAD', None)
+os.environ.pop('FLEET_RUNNER_JOB_SLOT', None)
 if mode != 'shared':
     os.execv('/bin/bash', ['bash', '-c', script, name, *arguments])
 
@@ -66,6 +67,9 @@ for index in range(slots):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         inherit(fd)
+        # Expose the existing kernel-owned identity, not another allocator.
+        # One-based numbering lets clients select their indexed runtimes.
+        os.environ['FLEET_RUNNER_JOB_SLOT'] = str(index + 1)
         break
     except BlockingIOError:
         os.close(fd)

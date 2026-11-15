@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { spawn, spawnSync } from 'node:child_process';
 import { loadProject, registerProject } from '../src/registry.ts';
 import { parseManifest } from '../src/schema/manifest.ts';
 import { Interrupts, runProfile } from '../src/run/runJob.ts';
@@ -38,6 +38,49 @@ function setup(command = 'echo tests 1', extra: Record<string, unknown> = {}) {
 test('rsync requires an explicit bounded cache', () => {
   assert.throws(() => parseManifest({ schemaVersion: 1, id: 'demo', sync: { include: ['**'] },
     profiles: { test: { description: 'test', kind: 'check', argv: ['true'], timeoutMinutes: 1, sourceTransfer: 'rsync' } } }, 'fixture'), /named cache/);
+});
+
+test('rsync SSH launch errors retain their code without exposing the route', () => {
+  const fixture = setup();
+  try {
+    const result = spawnSync(process.execPath, [new URL('../src/transport/rsyncSsh.ts', import.meta.url).pathname, 'fleet-worker', 'fleet-runner-receiver'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: join(fixture.env.root, 'missing-ssh'), FLEET_RUNNER_RSYNC_SSH_ARGS: '[]', FLEET_RUNNER_RSYNC_RECEIVER: 'private-route-sentinel' },
+    });
+    assert.equal(result.status, 255);
+    assert.match(result.stderr, /rsync SSH launch failed \(ENOENT\)/);
+    assert.equal(result.stderr.includes('private-route-sentinel'), false);
+    const bin = join(fixture.env.root, 'missing-ssh');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'ssh'), '#!/bin/sh\nexit 73\n', { mode: 0o755 });
+    const refused = spawnSync(process.execPath, [new URL('../src/transport/rsyncSsh.ts', import.meta.url).pathname, 'fleet-worker', 'fleet-runner-receiver'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: bin, FLEET_RUNNER_RSYNC_SSH_ARGS: '[]', FLEET_RUNNER_RSYNC_RECEIVER: 'private-route-sentinel' },
+    });
+    assert.equal(refused.status, 73);
+    assert.match(refused.stderr, /rsync SSH ended \(73\)/);
+    assert.equal(refused.stderr.includes('private-route-sentinel'), false);
+  } finally { fixture.env.cleanup(); }
+});
+
+test('rsync receiver explains terminal refusal and worker signal while preserving failure codes', () => {
+  const fixture = setup();
+  try {
+    const job = join(fixture.env.remoteRoot, 'jobs/diagnostic-fixture');
+    mkdirSync(join(job, 'meta'), { recursive: true });
+    writeFileSync(join(job, '.fleet-job'), '');
+    writeFileSync(join(job, 'result'), 'reason=aborted\n');
+    const receiver = new URL('../remote/rsync_receive.py', import.meta.url).pathname;
+    const worker = join(job, 'meta/rsync-worker.py');
+    const refused = spawnSync('python3', ['-B', receiver, job, worker], { encoding: 'utf8' });
+    assert.equal(refused.status, 73);
+    assert.match(refused.stderr, /job is terminal or source is already present/);
+    rmSync(join(job, 'result'));
+    writeFileSync(worker, 'import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n');
+    const signalled = spawnSync('python3', ['-B', receiver, job, worker], { encoding: 'utf8' });
+    assert.equal(signalled.status, 1);
+    assert.match(signalled.stderr, /worker ended with signal 9/);
+  } finally { fixture.env.cleanup(); }
 });
 
 test('rsync preserves quotes and spaces in the configured remote root', { timeout: 30000 }, async () => {

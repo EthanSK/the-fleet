@@ -178,6 +178,24 @@ test('an unavailable preferred submit worker advances before any execution', asy
   } finally { await f.close(); }
 });
 
+test('saved operation output retains each worker refusal after all candidates decline', async () => {
+  const { f, manifest, unavailable, preflights } = await fixture();
+  try {
+    unavailable.add('first');
+    preflights.set('second', { lock: 'busy' });
+    const started = await f.call('POST', '/v1/submit', { cwd: f.root, machines: ['first', 'second'],
+      request: { source: f.root, manifest, profile: 'check' } });
+    const end = await finish(f, started.body['operationId']);
+    assert.equal(end['exitCode'], 4, JSON.stringify(end));
+    assert.match(String(end['output']), /first: Controlled unavailable worker/);
+    assert.match(String(end['output']), /second: .*busy/i);
+    assert.match(String(end['output']), /No available remote workers/);
+    assert.equal(f.executed.length, 0);
+    const saved = await f.call('GET', `/v1/operations/${started.body['operationId']}`);
+    assert.equal(saved.body['output'], end['output']);
+  } finally { await f.close(); }
+});
+
 test('an externally reserved preferred submit worker advances without execution', async () => {
   const { f, manifest, attempted } = await fixture();
   try {

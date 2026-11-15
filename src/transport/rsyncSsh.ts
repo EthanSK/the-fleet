@@ -14,6 +14,14 @@ if (!Array.isArray(route) || !route.every((argument: unknown) => typeof argument
   process.exit(64);
 }
 const child = spawn('ssh', [...route, `${receiver} ${remoteArguments.slice(1).map(shellQuote).join(' ')}`], { stdio: 'inherit' });
-child.on('error', () => { process.exitCode = 255; });
-child.on('exit', (code, signal) => { process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 143); });
+child.on('error', (error) => {
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : 'unknown';
+  // Keep launch failures diagnosable without printing the private SSH route.
+  process.stderr.write(`fleet-runner: rsync SSH launch failed (${code})\n`);
+  process.exitCode = 255;
+});
+child.on('exit', (code, signal) => {
+  if (code !== 0) process.stderr.write(`fleet-runner: rsync SSH ended (${code ?? signal ?? 'unknown'})\n`);
+  process.exitCode = code ?? (signal === 'SIGINT' ? 130 : 143);
+});
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(signal, () => { child.kill(signal); });

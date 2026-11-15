@@ -26,7 +26,7 @@ function fixture() {
   const transport = new RsyncTransport(env.remoteHome);
   function request(id: string, extra: Record<string, unknown> = {}, projectId = id): RunRequest {
     const source = join(env.root, id);
-    writeFiles(source, { 'run.sh': 'echo started > "$GATE/started-$LABEL"; while [ ! -f "$GATE/release-$LABEL" ]; do sleep 0.1; done; echo tests 1; echo "$LABEL" > result.txt', 'content.txt': id });
+    writeFiles(source, { 'run.sh': 'echo "${FLEET_RUNNER_JOB_SLOT-}" > "$GATE/slot-$LABEL"; echo started > "$GATE/started-$LABEL"; while [ ! -f "$GATE/release-$LABEL" ]; do sleep 0.1; done; echo tests 1; echo "$LABEL" > result.txt', 'content.txt': id });
     const manifest = join(env.root, id + '.json');
     writeFileSync(manifest, JSON.stringify({ schemaVersion: 1, id: projectId, sourceRoot: source, sync: { include: ['**'] }, profiles: { test: { description: id, kind: 'test', argv: ['bash', 'run.sh'], timeoutMinutes: 0.5, env: { GATE: env.root, LABEL: id }, artifacts: ['result.txt'], success: { minTestCount: { pattern: 'tests (\\d+)', min: 1 } }, ...extra } } }));
     registerProject(env.paths, manifest, undefined, true);
@@ -46,11 +46,13 @@ function staleShared(f: ReturnType<typeof fixture>, jobId: string): string {
 
 test('shared jobs overlap, slots bound admission, and cancelling one preserves its neighbour', { timeout: 30000 }, async () => {
   const f = fixture();
-  const a = f.request('first'), b = f.request('second');
-  let first: ReturnType<typeof runProfile> | undefined, second: ReturnType<typeof runProfile> | undefined;
+  const a = f.request('first'), b = f.request('second'), c = f.request('replacement');
+  let first: ReturnType<typeof runProfile> | undefined, second: ReturnType<typeof runProfile> | undefined, replacement: ReturnType<typeof runProfile> | undefined;
   try {
     first = runProfile(a); assert.equal(await f.started('first'), true);
     second = runProfile(b); assert.equal(await f.started('second'), true);
+    assert.equal(readFileSync(join(f.env.root, 'slot-first'), 'utf8').trim(), '1');
+    assert.equal(readFileSync(join(f.env.root, 'slot-second'), 'utf8').trim(), '2');
     const state = await fetchPreflight(f.transport, f.machine, [], []);
     assert.equal(state.sharedLocks?.length, 2);
     assert.equal(evaluatePreflight(state, f.machine, a.project.manifest.profiles['test'], { ignoreHeavyProcesses: false, nowEpoch: Date.now() / 1000 }).refusals.some((r) => r.kind === 'busy'), true);
@@ -59,11 +61,18 @@ test('shared jobs overlap, slots bound admission, and cancelling one preserves i
     assert.equal(stopped.receipt.outcome, 'cancelled');
     assert.equal(stopped.receipt.remote.lockReleased, true);
     assert.equal((await fetchPreflight(f.transport, f.machine, [], [])).sharedLocks?.length, 1);
+    replacement = runProfile(c); assert.equal(await f.started('replacement'), true);
+    assert.equal(readFileSync(join(f.env.root, 'slot-replacement'), 'utf8').trim(), '1');
+    assert.equal(readFileSync(join(f.env.root, 'slot-second'), 'utf8').trim(), '2');
+    f.release('replacement');
+    const reused = await replacement;
+    assert.equal(reused.receipt.outcome, 'passed');
+    assert.equal(reused.receipt.remote.lockReleased, true);
     f.release('second');
     const survivor = await second;
     assert.equal(survivor.receipt.outcome, 'passed', JSON.stringify(survivor.receipt));
     assert.equal(readFileSync(join(survivor.receiptPath, '..', 'artifacts/result.txt'), 'utf8'), 'second\n');
-  } finally { a.interrupts?.trigger(); b.interrupts?.trigger(); await Promise.allSettled([first, second]); f.env.cleanup(); }
+  } finally { a.interrupts?.trigger(); b.interrupts?.trigger(); c.interrupts?.trigger(); await Promise.allSettled([first, second, replacement]); f.env.cleanup(); }
 });
 
 for (const [name, extra] of [ ['port', { resources: ['port:4200'] }], ['unsafe cache', { cache: { name: 'shared', maxGiB: 0.1 } }], ['desktop', { requires: { guiSession: true } }] ] as const) {
