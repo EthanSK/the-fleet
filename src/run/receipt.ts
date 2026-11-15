@@ -18,9 +18,11 @@ import { SOURCE_CHANGED_SUMMARY_SUFFIX } from '../snapshot/readFile.ts';
 import type { ProfileKind } from '../schema/manifest.ts';
 import type { SuccessCheck } from './success.ts';
 import type { RsyncStatistics } from './rsyncTransfer.ts';
+import { pruneSourceStages, SOURCE_STAGE_OWNER, sourceStageOwnerIsAbandoned } from './sourceStage.ts';
+
+export { SOURCE_STAGE_OWNER } from './sourceStage.ts';
 
 export const RUN_MARKER = '.fleet-run';
-export const SOURCE_STAGE_OWNER = '.source-stage-owner.json';
 const KEEP_LOCAL_RUNS = 50;
 
 /**
@@ -213,6 +215,8 @@ export async function createRunDirectory(paths: StatePaths, jobId: string): Prom
 
 /** Reclaim only disposable staging whose recorded local processes are gone. */
 export async function pruneAbandonedSourceStages(paths: StatePaths): Promise<void> {
+  await pruneSourceStages(paths);
+  // Preserve recovery for stages made by older builds in an SD run folder.
   const names = await fs.readdir(paths.runsDir).catch(() => []);
   for (const name of names) {
     if (!/^[a-z0-9-]+$/.test(name)) continue;
@@ -222,17 +226,7 @@ export async function pruneAbandonedSourceStages(paths: StatePaths): Promise<voi
     try {
       if (!(await fs.lstat(directory)).isDirectory() || !(await fs.lstat(ownerPath)).isFile() || !(await fs.lstat(join(directory, RUN_MARKER))).isFile()) continue;
       const owner: unknown = JSON.parse(await fs.readFile(ownerPath, 'utf8'));
-      if (typeof owner !== 'object' || owner === null || !('pids' in owner) || !Array.isArray(owner.pids) || owner.pids.length === 0) continue;
-      if ('startingRsync' in owner && owner.startingRsync !== false) continue;
-      let abandoned = true;
-      for (const pid of owner.pids) {
-        if (!Number.isSafeInteger(pid) || pid < 1) { abandoned = false; break; }
-        try { process.kill(pid, 0); abandoned = false; break; }
-        catch (error) {
-          if (!(error instanceof Error) || !('code' in error) || error.code !== 'ESRCH') { abandoned = false; break; }
-        }
-      }
-      if (!abandoned) continue;
+      if (!sourceStageOwnerIsAbandoned(owner)) continue;
       const source = await fs.lstat(sourcePath).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== 'ENOENT') throw error;
         return undefined;

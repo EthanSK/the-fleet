@@ -8,7 +8,7 @@
 // end-to-end without a network. There is deliberately no "local" machine
 // kind: a failed remote run never falls back to running here.
 
-import type { ChildProcessByStdio } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { FleetError } from '../errors.ts';
 
@@ -37,12 +37,20 @@ export interface Transport {
   /** Human description without addresses, e.g. "Agent Bridge target Mac-Mini (internet route)". */
   readonly description: string;
   start(remoteCommand: string): RemoteProcess;
-  /** Rsync uses this same paired SSH route, with a guarded remote receiver. */
+  /** Same paired route. Must wait for stdin "go\n" before reading source,
+   * keep its PID through exec, and exit on EOF without starting rsync. */
   startRsync?(sourceDirectory: string, receiverCommand: string): RemoteProcess;
   /** Holds loopback port forwards over this same paired route; the process lives until killed. */
   startForwarding?(forwards: readonly PortForward[]): RemoteProcess;
   /** True when a failed process's stderr shows the connection itself failed. */
   isConnectionFailure(exit: RemoteExit, stderr: string): boolean;
+}
+
+/** EOF before ownership is recorded must never leave an untracked reader. */
+export function startGatedRsync(args: readonly string[], environment: NodeJS.ProcessEnv): RemoteProcess {
+  return wrapChild(spawn('/bin/sh', [
+    '-c', 'IFS= read -r gate && [ "$gate" = go ] || exit 75; exec "$@"', 'fleet-rsync', '/usr/bin/rsync', ...args,
+  ], { stdio: ['pipe', 'pipe', 'pipe'], env: environment }));
 }
 
 export function wrapChild(child: ChildProcessByStdio<Writable, Readable, Readable>): RemoteProcess {

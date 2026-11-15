@@ -11,7 +11,8 @@ import { rsyncReceiverCommand } from '../remote/remoteScripts.ts';
 import { assertSnapshotUnchanged, stageSnapshot } from '../snapshot/stage.ts';
 import type { SnapshotPlan } from '../snapshot/select.ts';
 import type { Transport } from '../transport/transport.ts';
-import { SOURCE_STAGE_OWNER } from './receipt.ts';
+import type { StatePaths } from '../paths.ts';
+import { createSourceStage, removeSourceStage, SOURCE_STAGE_OWNER } from './sourceStage.ts';
 
 export interface RsyncStatistics {
   readonly mode: 'rsync';
@@ -39,18 +40,21 @@ export async function syncSource(input: {
   readonly transport: Transport;
   readonly remoteJobDirectory: string;
   readonly runDirectory: string;
+  readonly paths: StatePaths;
+  readonly jobId: string;
   readonly plan: SnapshotPlan;
   readonly cancelled: () => boolean;
 }): Promise<RsyncStatistics> {
   const { transport, plan, runDirectory, cancelled } = input;
   if (!transport.startRsync) throw new FleetError('usage', 'This transport does not support rsync.');
-  const directory = join(runDirectory, 'source.noindex');
+  const stageDirectory = await createSourceStage(input.paths, input.jobId);
+  const directory = join(stageDirectory, 'source.noindex');
   let process: ReturnType<NonNullable<Transport['startRsync']>> | undefined;
   let output = '';
   let errors = '';
-  const ownerPath = join(runDirectory, SOURCE_STAGE_OWNER);
-  const recordOwner = async (pids: number[], startingRsync = false): Promise<void> => {
-    await fs.writeFile(`${ownerPath}.tmp`, JSON.stringify({ pids, startingRsync }), { mode: 0o600 });
+  const ownerPath = join(stageDirectory, SOURCE_STAGE_OWNER);
+  const recordOwner = async (pids: number[]): Promise<void> => {
+    await fs.writeFile(`${ownerPath}.tmp`, JSON.stringify({ pids, startingRsync: false }), { mode: 0o600 });
     await fs.rename(`${ownerPath}.tmp`, ownerPath);
   };
   try {
@@ -58,16 +62,18 @@ export async function syncSource(input: {
     const stageStarted = performance.now();
     await stageSnapshot(plan, directory, cancelled);
     const stageFinished = performance.now();
-    // A killed controller might leave rsync alive while the child PID is
-    // being written to slow storage. Recovery must leave that stage alone.
-    await recordOwner([clientPid], true);
     if (cancelled()) throw new FleetError('transport', 'Source transfer cancelled.');
     const syncStarted = performance.now();
     process = transport.startRsync(directory, rsyncReceiverCommand(input.remoteJobDirectory));
-    process.stdin.end();
     process.stdout.on('data', (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(-1024 * 1024); });
     process.stderr.on('data', (chunk: Buffer) => { errors = (errors + chunk.toString('utf8')).slice(-16 * 1024); });
-    if (process.pid !== undefined) await recordOwner([clientPid, process.pid]);
+    // The transport waits on stdin before exec'ing rsync with this same PID.
+    // Until both owners are recorded, EOF from a killed controller starts no
+    // reader. This closes the old permanently-uncertain launch window.
+    if (process.pid !== undefined) {
+      await recordOwner([clientPid, process.pid]);
+      process.stdin.end('go\n');
+    } else process.stdin.end();
     const result = await process.exited;
     const recheckStarted = performance.now();
     await fs.writeFile(join(runDirectory, 'rsync.log'), `${output}${errors}`, { mode: 0o600 });
@@ -83,9 +89,10 @@ export async function syncSource(input: {
   } finally {
     // Disconnection/ABORT stops the receiver through its upload guard. This
     // local cleanup never touches the source inode's contents or permissions.
-    if (process) await process.exited;
-    await fs.rm(directory, { recursive: true, force: true });
-    await fs.rm(ownerPath, { force: true });
-    await fs.rm(`${ownerPath}.tmp`, { force: true });
+    if (process) {
+      process.stdin.end(); // Also releases an uncommitted launch as EOF.
+      await process.exited;
+    }
+    await removeSourceStage(stageDirectory);
   }
 }

@@ -3,9 +3,9 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, promises as fs, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import { spawn, spawnSync } from 'node:child_process';
 import { loadProject, registerProject } from '../src/registry.ts';
 import { parseManifest } from '../src/schema/manifest.ts';
@@ -14,6 +14,7 @@ import { fetchStatus } from '../src/run/remoteChecks.ts';
 import { testEnvironment, testMachine, waitUntil, writeFiles } from './helpers/fixtures.ts';
 import { RsyncTransport } from './helpers/rsyncTransport.ts';
 import { rsyncFileCacheArguments } from '../src/transport/rsyncArguments.ts';
+import { sourceStageRoot } from '../src/run/sourceStage.ts';
 
 function setup(command = 'echo tests 1', extra: Record<string, unknown> = {}) {
   const env = testEnvironment();
@@ -184,6 +185,64 @@ test('rsync cold and warm runs isolate execution and never retain job env', { ti
   } finally { fixture.env.cleanup(); }
 });
 
+test('rsync stages outside results and TMPDIR, then retains only run evidence', { timeout: 30000 }, async () => {
+  const fixture = setup('echo report > report.txt; echo tests 1', { artifacts: ['report.txt'] });
+  const results = join(fixture.env.root, 'returned.noindex');
+  const scratch = join(fixture.env.root, 'tmp.noindex');
+  mkdirSync(results);
+  mkdirSync(scratch);
+  const originalTmp = process.env['TMPDIR'];
+  process.env['TMPDIR'] = scratch;
+  try {
+    const run = await runProfile({ ...fixture.request, paths: { ...fixture.env.paths, runsDir: results } });
+    assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.equal(fixture.transport.sourceDirectory, join(sourceStageRoot(fixture.env.paths), run.receipt.jobId, 'source.noindex'));
+    assert.deepEqual(readdirSync(sourceStageRoot(fixture.env.paths)), []);
+    assert.deepEqual(readdirSync(scratch), []);
+    assert.equal(existsSync(join(results, run.receipt.jobId, 'source.noindex')), false);
+    assert.equal(readFileSync(join(results, run.receipt.jobId, 'artifacts/report.txt'), 'utf8').trim(), 'report');
+    assert.equal(existsSync(join(results, run.receipt.jobId, 'rsync.log')), true);
+    assert.equal(existsSync(run.receiptPath), true);
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(run.receipt.remote.processesRemaining, false);
+  } finally {
+    if (originalTmp === undefined) delete process.env['TMPDIR']; else process.env['TMPDIR'] = originalTmp;
+    fixture.env.cleanup();
+  }
+});
+
+test('overlapping uploads have separate disposable controller copies', { timeout: 30000 }, async () => {
+  const fixture = setup('echo tests 1', { cache: { name: 'shared-fixture', maxGiB: 0.1, concurrent: true } });
+  const machine = testMachine();
+  fixture.request.machine = { ...machine, limits: { ...machine.limits, maxConcurrentJobs: 2 } };
+  try {
+    const runs = await Promise.all([runProfile(fixture.request), runProfile(fixture.request)]);
+    for (const run of runs) {
+      assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+      assert.equal(run.receipt.remote.lockReleased, true);
+      assert.equal(run.receipt.remote.processesRemaining, false);
+    }
+    assert.equal(new Set(fixture.transport.sourceDirectories).size, 2);
+    assert.deepEqual(readdirSync(sourceStageRoot(fixture.env.paths)), []);
+  } finally { fixture.env.cleanup(); }
+});
+
+test('source-space refusal checks staging rather than the results volume', { timeout: 30000 }, async () => {
+  const fixture = setup();
+  const available = await fs.statfs(fixture.env.root);
+  let checked: unknown;
+  const statfs = mock.method(fs, 'statfs', async (path: unknown) => {
+    checked = path;
+    return { ...available, bavail: 0 };
+  });
+  try {
+    await assert.rejects(runProfile(fixture.request), /source staging volume has only/);
+    assert.equal(checked, sourceStageRoot(fixture.env.paths));
+    assert.deepEqual(readdirSync(sourceStageRoot(fixture.env.paths)), []);
+    assert.equal(existsSync(join(fixture.env.remoteRoot, 'jobs')), false);
+  } finally { statfs.mock.restore(); fixture.env.cleanup(); }
+});
+
 test('rsync preserves one-edit delta, deletions, renames and fixes corrupted cache content', { timeout: 30000 }, async () => {
   const fixture = setup();
   writeFileSync(join(fixture.source, 'large.dat'), randomBytes(2 * 1024 * 1024));
@@ -253,6 +312,7 @@ test('corruption after rsync is refused before materialization or command start'
     assert.equal(run.receipt.timing.remoteStartedAt, null);
     assert.equal(run.receipt.remote.lockReleased, true);
     assert.equal(existsSync(fixture.tree), false);
+    assert.deepEqual(readdirSync(sourceStageRoot(fixture.env.paths)), []);
   } finally { fixture.env.cleanup(); }
 });
 
@@ -269,6 +329,7 @@ test('cancellation during a rate-limited rsync stops receiver before cleanup', {
     assert.equal(run.receipt.remote.lockReleased, true);
     assert.equal(run.receipt.timing.remoteStartedAt, null);
     assert.equal((await fetchStatus(fixture.transport, fixture.request.machine)).lock.state, 'free');
+    assert.deepEqual(readdirSync(sourceStageRoot(fixture.env.paths)), []);
     assert.equal(existsSync(join(fixture.env.remoteRoot, 'jobs', run.receipt.jobId, 'src')), false);
     fixture.transport.extraArguments.length = 0;
     const retry = await runProfile(fixture.request);

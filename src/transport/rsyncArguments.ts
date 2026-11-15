@@ -1,5 +1,5 @@
 // Apple's rsync bypasses the OS file cache by default. Repeated checksums of
-// freshly staged source on external scratch should use that existing cache.
+// freshly staged source should use that existing cache on either volume.
 import { spawnSync } from 'node:child_process';
 
 let supportsFileCache: boolean | undefined;

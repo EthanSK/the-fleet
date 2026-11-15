@@ -8,8 +8,8 @@
 // Generated runtime output goes under runs.noindex so Spotlight does not index
 // logs and returned app bundles (excluded from desktop indexing).
 // Tar uploads stream directly. Opt-in rsync temporarily stages selected source
-// here as independent bounded copies, then removes it. Use the verified
-// external runs override below for large staging.
+// under home/source-staging.noindex as independent bounded copies, then removes
+// them. Results and recovery archives stay in the configured external run store.
 
 import { mkdirSync, chmodSync, existsSync, statSync, promises as fs } from 'node:fs';
 import { homedir } from 'node:os';

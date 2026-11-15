@@ -285,8 +285,13 @@ is guarded per cache/project. When a concurrent upload finds that copy busy,
 it uses the existing disposable job source instead of waiting; a full cache
 uses the same fallback. This may send a full source copy instead of a warm
 delta. Execution always uses an independent verified copy. On Apple rsync,
-the sender uses the OS file cache when supported, keeping checksum reads of
-external scratch fast; older/GNU receivers keep their existing options.
+the sender uses the OS file cache when supported; older/GNU receivers keep
+their existing options. Fully ephemeral controller source copies use
+`source-staging.noindex` under the Fleet state home, normally on the internal
+SSD, and are removed after upload or reclaimed after a dead owner. Retained
+logs, results and recovery archives stay in the configured external run store.
+This staging location is independent of `TMPDIR` and the results setting;
+an explicit state-home override relocates it with the rest of that state.
 Cache usage stays protected through uploads and job
 children. Post-job retention can evict an over-limit cache only after its last
 user leaves; the limit is a retention cap, not a hard concurrent disk quota.

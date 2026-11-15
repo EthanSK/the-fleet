@@ -27,6 +27,7 @@ import { Readable, type Writable } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import { EXIT_CODES, FleetError, RunNotStartedError, usageError } from '../errors.ts';
 import type { StatePaths } from '../paths.ts';
+import { ensureSourceStageRoot } from './sourceStage.ts';
 import type { LoadedProject } from '../registry.ts';
 import { supervisorCommand, uploadCommand } from '../remote/remoteScripts.ts';
 import { parseFields } from '../remote/supervisorStream.ts';
@@ -215,15 +216,12 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
   // ---- local run folder
   await pruneAbandonedSourceStages(paths);
   if (profile.sourceTransfer === 'rsync') {
-    const { bsize, bavail } = await fs.statfs(paths.runsDir).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT' && paths.runsDir === join(paths.home, 'runs.noindex')) return fs.statfs(paths.home);
-      throw error;
-    });
+    const { bsize, bavail } = await fs.statfs(await ensureSourceStageRoot(paths));
     // The copy requires space for the data and filesystem allocation for
     // small files. A different ship cannot fix a full controller volume.
     const needed = plan.totalBytes + plan.entries.length * bsize;
     if (bavail * bsize < needed) {
-      throw usageError(`The Fleet results volume has only ${formatMiB(bavail * bsize)} free. Staging this source needs about ${formatMiB(needed)}. Choose a results folder on a volume with more space.`);
+      throw usageError(`The Fleet source staging volume has only ${formatMiB(bavail * bsize)} free. Staging this source needs about ${formatMiB(needed)}. Free space on that volume before running again.`);
     }
   }
   const runDirectory = await createRunDirectory(paths, jobId);
@@ -323,7 +321,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
         metadata.push({ kind: 'data', name: 'meta/rsync-worker.py', mode: 0o600, data: readFileSync(new URL('../../remote/rsync_worker.py', import.meta.url)) });
         await upload(transport, remoteJobDirectory, metadata);
         io.status(`Syncing selected source to ${machine.id}`);
-        transfer = await syncSource({ transport, remoteJobDirectory, runDirectory, plan, cancelled: () => cancelRequested });
+        transfer = await syncSource({ transport, remoteJobDirectory, runDirectory, paths, jobId, plan, cancelled: () => cancelRequested });
       } else {
         await upload(transport, remoteJobDirectory, members);
       }

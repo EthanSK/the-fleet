@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { Machine } from '../schema/machines.ts';
 import { loadAgentBridgeRoute, type AgentBridgeRoute } from './agentBridgeConfig.ts';
-import { wrapChild, type PortForward, type RemoteExit, type RemoteProcess, type Transport } from './transport.ts';
+import { startGatedRsync, wrapChild, type PortForward, type RemoteExit, type RemoteProcess, type Transport } from './transport.ts';
 import { shellQuote } from './shellQuote.ts';
 import { rsyncFileCacheArguments } from './rsyncArguments.ts';
 
@@ -98,11 +98,11 @@ export class SshTransport implements Transport {
     // Same SSH options and identity as start(); no new connection config.
     // Only the private selected-source directory is traversed recursively.
     const rsh = [process.execPath, fileURLToPath(new URL('./rsyncSsh.ts', import.meta.url))].map(shellQuote).join(' ');
-    return wrapChild(spawn('/usr/bin/rsync', [
+    return startGatedRsync([
       '-rlptc', '--delete', '--stats', '--no-owner', '--no-group', ...rsyncFileCacheArguments(),
       '-e', rsh, '--rsync-path', 'fleet-runner-receiver',
       `${sourceDirectory}/`, 'fleet-worker:fleet-runner-source',
-    ], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FLEET_RUNNER_RSYNC_SSH_ARGS: JSON.stringify(sshArguments(this.route)), FLEET_RUNNER_RSYNC_RECEIVER: receiverCommand } }));
+    ], { ...process.env, FLEET_RUNNER_RSYNC_SSH_ARGS: JSON.stringify(sshArguments(this.route)), FLEET_RUNNER_RSYNC_RECEIVER: receiverCommand });
   }
 
   startForwarding(forwards: readonly PortForward[]): RemoteProcess {
