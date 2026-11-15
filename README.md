@@ -373,16 +373,27 @@ client's CLI and browser sessions; they end on `forward stop`, on `release`
 (after ssh has exited), or when the service itself stops. Nothing listens
 outside loopback on either end, and nothing is installed on the ship.
 
-`forward` returns once every local port accepts connections, or fails with
-ssh's own reason, such as an occupied local port. A session that later drops
+The first `forward` request waits for SSH to bind its local listeners, or
+fails with a fixed, address-free category such as an occupied local port.
+A repeated request for the same ports returns the current forwarding state;
+callers must require `state: "connected"` before using it. A repeat can return
+`reconnecting` while SSH is being replaced. The same owner must finish a stop
+before requesting those forwards again. A session that later drops
 (sleep, a Tailscale blip, a ship reboot) is reconnected with bounded backoff
 while the reservation keeps it; `state` shows each reservation's `forwarding`
 with its `state` (`connecting`, `connected`, `reconnecting`, `failed`,
-`stopped`), ports, attempt count and last ssh detail. Whether the service
+`stopped`), ports, attempt count and a fixed failure detail, without raw SSH
+stderr or private routes. Whether the service
 behind a remote port answers is the owning app's health check, not the
 coordinator's. Forwards are not persisted: after a service restart, request
 them again with the same reservation. A local port already forwarded by
 another reservation is refused, naming its owner.
+
+Clean shutdown and release wait for SSH to exit. A forced coordinator crash
+outside a service manager can leave an orphaned SSH session holding local
+ports; inspect and stop that exact process before reusing or releasing the
+reservation. Expiry or a restarted coordinator does not prove those forwards
+stopped. The launchd installation also owns its job's process group.
 
 ## Local API
 

@@ -82,6 +82,7 @@
       "argv": [
         "swift",
         "test",
+        "--disable-keychain",
         "--jobs",
         "2",
         "--scratch-path",

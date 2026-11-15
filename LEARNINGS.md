@@ -1,5 +1,7 @@
 # Fleet Runner lessons
 
+- Noninteractive SwiftPM checks of this project's public Sparkle download can stop before testing because the worker's Keychain is locked. Use SwiftPM's documented --disable-keychain for that public-dependency check instead of unlocking or changing credentials. The desktop profile carries the option; its real Mini run completed with no failures.
+
 - launchd resolves a relative program using its system PATH, rather than the job's EnvironmentVariables PATH. Record Python's absolute sys.executable during service installation, as the CLI already does for Node with process.execPath. Fresh bootstrap rejected relative python3 with error 5 on a Homebrew controller; an absolute interpreter registered successfully. Resolve through Python itself so a pyenv shim is not mistaken for the interpreter.
 
 - Concurrent dependency-cache access does not make its mutable retained source concurrent. A blocking per-project source guard can make several uploads consume their whole deadline behind one stalled sender, before receiver rsync or any test starts. Attempt the source guard nonblockingly for explicitly concurrent caches and reuse the existing private-job fallback when busy; keep exclusive-cache serialization, upload/cache usage guards, SHA verification and peer data intact. A peer-held-lock regression timed out on the blocking implementation and passed with the peer still alive, including cancellation of a second disposable upload.
