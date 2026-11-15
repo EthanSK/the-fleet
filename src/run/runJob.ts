@@ -273,6 +273,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
   // may arrive in the same SSH chunk, before an awaited continuation runs.
   const artifactArchive = join(runDirectory, 'artifacts.tar.part');
   session.captureArtifactsTo(artifactArchive);
+  let artifactContentVerified = false;
 
   let jobStarted = false;
   let admission: RunResult['admission'] = 'uncertain';
@@ -371,6 +372,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
             throw new FleetError('artifactVerification', `Declared output ${artifact} has no verified returned content.`);
           }
         }
+        artifactContentVerified = true;
         session.send('ACK');
       } catch (error) {
         state.artifactError = error instanceof FleetError ? error : new FleetError('artifactVerification', String(error));
@@ -425,6 +427,18 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
     }
   }
   if (state.stuck) state.notes.push('job processes did not exit; the lock is kept until they do');
+
+  // Like recovery's archive disposal, remove only the redundant transport
+  // copy after content verification and confirmed completion. Keep uncertain
+  // or unverified returns for recovery; useful files and receipts stay put.
+  // RELEASED/BYE can follow an unreceived ACK too: the existing retention
+  // note distinguishes that case from confirmed normal return.
+  if (artifactContentVerified && state.failure === null && state.artifactError === null
+    && state.missingArtifacts.length === 0 && state.lockReleased && !state.stuck && session.linesWith('BYE').length > 0
+    && !state.notes.some((note) => note.startsWith('artifacts retained for verified recovery: '))) {
+    try { await fs.rm(artifactArchive, { force: true }); }
+    catch (error) { state.failure = new FleetError('transport', error instanceof Error ? error.message : String(error)); }
+  }
 
   // ---- success and receipt
   const output = `${await readTail(join(runDirectory, 'stdout.log'))}\n${await readTail(join(runDirectory, 'stderr.log'))}`;
