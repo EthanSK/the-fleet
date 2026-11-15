@@ -132,5 +132,6 @@ done
 
 printf 'lock=%s\n' "$(fr_lock_state)"
 fr_shared_states
+printf 'pending_artifacts=%s\n' "$(fr_pending_archive_count)"
 if fr_guard_busy "$FR_ROOT/locks/admission"; then printf 'admission_free=0\n'; else printf 'admission_free=1\n'; fi
 printf 'done=1\n'

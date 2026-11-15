@@ -38,6 +38,16 @@ fr_is_job_id() {
   case "$1" in ''|*[!a-z0-9-]*) return 1 ;; -*) return 1 ;; *) return 0 ;; esac
 }
 
+# Extraction of the existing supervisor.sh pending-archive count. Preflight
+# now shares this observation; the supervisor still checks again at admission.
+fr_pending_archive_count() {
+  local _pending=0 _marker
+  for _marker in "$FR_ROOT"/jobs/*/artifacts.pending; do
+    [ -f "$_marker" ] && _pending=$((_pending + 1))
+  done
+  printf '%s\n' "$_pending"
+}
+
 # Reads one key from a key=value file. Prints the value; fails when absent.
 fr_kv_get() {
   _fr_file=$1

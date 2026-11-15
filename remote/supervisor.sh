@@ -56,11 +56,13 @@ case "$LABEL" in ''|*[!A-Za-z0-9/._-]*) fr_fail_early 'invalid label' 64 ;; esac
 mkdir -p "$FR_ROOT/locks" "$FR_ROOT/jobs" 2>/dev/null || fr_fail_early "can't create $FR_ROOT" 73
 # Pending archives cannot rotate away before verified return. Bound their
 # count by admission instead of deleting an unacknowledged result.
-_pending=0
-for _marker in "$FR_ROOT"/jobs/*/artifacts.pending; do
-  [ -f "$_marker" ] && _pending=$((_pending + 1))
-done
-[ "$_pending" -lt "$KEEP_JOBS" ] || fr_fail_early 'recover pending artifacts before starting another job' 73
+_pending=$(fr_pending_archive_count)
+if [ "$_pending" -ge "$KEEP_JOBS" ]; then
+  # This refusal precedes the job lock, READY/upload and command execution.
+  # Use the existing conclusive BUSY path, never a general ERROR retry rule.
+  fr_proto 'BUSY recover pending artifacts before starting another job'
+  exit 75
+fi
 LOCK=$(fr_lock_dir)
 JOB_DIR="$FR_ROOT/jobs/$JOB_ID"
 

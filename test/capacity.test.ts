@@ -18,6 +18,7 @@ import { RunNotStartedError } from '../src/errors.ts';
 import { report } from './helpers/serviceFixture.ts';
 import { testEnvironment, testMachine, waitUntil, writeFiles } from './helpers/fixtures.ts';
 import { RsyncTransport } from './helpers/rsyncTransport.ts';
+import { AdmissionTransport } from './helpers/admissionTransport.ts';
 
 function fixture() {
   const env = testEnvironment();
@@ -253,6 +254,52 @@ for (const failure of ['preflight', 'source-plan'] as const) {
       assert.equal(leases[0]?.state, 'unverified');
       assert.equal(existsSync(join(f.env.root, 'started-refused')), false);
     } finally { f.env.cleanup(); }
+  });
+}
+
+for (const failure of ['pending-cap', 'uncertain', 'lost-result'] as const) {
+  test(`late ${failure} admission preserves a live neighbour and the correct ownership`, { timeout: 60000 }, async () => {
+    const f = fixture();
+    const machine = { ...f.machine, limits: { ...f.machine.limits, keepJobs: 1 } };
+    const neighbourId = 'a'.repeat(24), refusedId = 'b'.repeat(24);
+    const lostResult = new AdmissionTransport(f.env.remoteHome); lostResult.loseResult = true;
+    const a = { ...f.request('neighbour', { timeoutMinutes: 1 }), machine };
+    const b = { ...f.request('refused'), machine, ...(failure === 'lost-result' ? { transport: lostResult } : {}) };
+    const c = new Coordinator(f.env.paths, { machines: () => [machine],
+      inspect: async candidate => ({ machine: candidate, observedAt: new Date().toISOString(), report: await fetchPreflight(f.transport, candidate, [], []) }),
+      localFingerprint: async () => 'dispatcher', now: Date.now,
+      route: () => ({ target: 'fixture', host: 'localhost', user: 'test', port: 22, path: 'internet' }), execute: runProfile });
+    let neighbour: ReturnType<typeof c.runOne> | undefined;
+    try {
+      neighbour = c.runOne('neighbour', neighbourId, a);
+      // Wait for actual execution, within this fixture's longer job budget.
+      // The generic 10s helper can expire while SD source preparation is busy.
+      assert.equal(await waitUntil(() => existsSync(join(f.env.root, 'started-neighbour')), 30000), true);
+      const before = await fetchPreflight(f.transport, machine, [], []);
+      assert.equal(before.pendingArtifacts, 0);
+      if (failure === 'pending-cap') writeFiles(f.env.remoteRoot, {
+        'jobs/retained/.fleet-job': '', 'jobs/retained/artifacts.pending': '', 'jobs/retained/artifacts.tar': 'only-result',
+      });
+      else if (failure === 'uncertain') {
+        const start = f.transport.start.bind(f.transport);
+        f.transport.start = command => start(command.includes('fleet-runner-supervisor') ? "printf '@@FR ERROR fixture\\n'" : command);
+      }
+      else f.release('refused');
+      const refused = await c.runOne('refused', refusedId, { ...b, preflightReport: before });
+      assert.ok(refused);
+      assert.equal(refused.admission, failure === 'pending-cap' ? 'refused' : failure === 'lost-result' ? 'admitted' : 'uncertain');
+      if (failure === 'lost-result') assert.equal(refused.receipt.outcome, 'error');
+      const leases = (await c.state(true) as { reservations: { id: string; state: string }[] }).reservations;
+      assert.equal(leases.find(lease => lease.id === neighbourId)?.state, 'active');
+      assert.equal(leases.find(lease => lease.id === refusedId)?.state, failure === 'pending-cap' ? undefined : 'unverified');
+      assert.equal(existsSync(join(f.env.root, 'started-refused')), failure === 'lost-result');
+      if (failure === 'pending-cap') {
+        assert.equal(readFileSync(join(f.env.remoteRoot, 'jobs/retained/artifacts.tar'), 'utf8'), 'only-result');
+        execFileSync('python3', ['-c', 'import fcntl,sys; f=open(sys.argv[1],"r+"); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)', join(f.env.remoteRoot, 'locks/slot-1')]);
+      }
+      f.release('neighbour');
+      assert.equal((await neighbour)?.receipt.outcome, 'passed');
+    } finally { a.interrupts?.trigger(); await Promise.allSettled([neighbour]); f.env.cleanup(); }
   });
 }
 
