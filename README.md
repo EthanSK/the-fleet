@@ -343,6 +343,34 @@ Reserve returns connection information (including an SSH key path, never its
 contents), current health, a reservation ID and a private token. Keep the token
 out of shared logs. The ship remains reserved until release is verified.
 Reservations are private mode-0600 state. Their stored token is hashed.
+The `connection` also carries the ship's registered `remoteRoot`, `pathPrepend`
+and optional `dockerContext`, so an owner can run its own commands in the
+registered worker environment. Other machine environment values stay private.
+
+### Loopback port forwards
+
+```sh
+the-fleet forward --id RESERVATION_ID --token RESERVATION_TOKEN --ports 3021,18101:18101
+the-fleet forward stop --id RESERVATION_ID --token RESERVATION_TOKEN
+```
+
+An external reservation can ask the coordinator to hold `ssh -N -L` forwards
+from this computer's `127.0.0.1` to the ship's `127.0.0.1` over the same paired
+route. The coordinator owns that ssh session, so the forwards outlive the
+client's CLI and browser sessions; they end on `forward stop`, on `release`
+(after ssh has exited), or when the service itself stops. Nothing listens
+outside loopback on either end, and nothing is installed on the ship.
+
+`forward` returns once every local port accepts connections, or fails with
+ssh's own reason, such as an occupied local port. A session that later drops
+(sleep, a Tailscale blip, a ship reboot) is reconnected with bounded backoff
+while the reservation keeps it; `state` shows each reservation's `forwarding`
+with its `state` (`connecting`, `connected`, `reconnecting`, `failed`,
+`stopped`), ports, attempt count and last ssh detail. Whether the service
+behind a remote port answers is the owning app's health check, not the
+coordinator's. Forwards are not persisted: after a service restart, request
+them again with the same reservation. A local port already forwarded by
+another reservation is refused, naming its owner.
 
 ## Local API
 
@@ -362,6 +390,8 @@ HTTP runs over `~/.the-fleet/service.sock` (mode 0600), not an open TCP port.
 | POST /v1/reservations | `{owner, label, machines?, ttlSeconds?, claim?}` |
 | POST /v1/activate | `{id, token}`: activate a drained ship after fresh idle proof |
 | POST /v1/renew or /v1/release | `{id, token, ttlSeconds?}` |
+| POST /v1/forwards | `{id, token, forwards: [{localPort, remotePort}]}`: hold loopback ssh forwards for an external reservation |
+| POST /v1/forwards/stop | `{id, token}`: end that reservation's forwards and wait for ssh to exit |
 | POST /v1/recover?machine=ID | Verify and clear interrupted managed ownership for one ship; omit the query for the whole fleet |
 | GET /v1/config | Ship settings, controller revision and effective results folder; environment names only |
 | PUT /v1/config/controller | `{revision, runsDirectory: absoluteNoindexPath \| null}` shared results-folder default |

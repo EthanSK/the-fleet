@@ -162,50 +162,64 @@ try:
             fail('invalid source entry kind')
     if not entries or total > max_bytes or int(read_meta('expected-count')) != len(entries) or set(entries) & parents:
         fail('invalid source file set or size')
-    # Synchronize only mutable retained source, not the whole job. A waiting
-    # receiver is cancelled by the existing upload deadline/guard. No polling
-    # sleep is introduced: the kernel wakes it when the previous sync exits.
+    # Concurrent jobs need not queue behind another upload's mutable source.
+    # Reuse the existing disposable-source path when its retained copy is busy;
+    # exclusive caches still serialize under their normal source guard.
     source_key = hashlib.sha256((cache_name + '/' + project).encode()).hexdigest()
     source_guard = os.open(os.path.join(root, 'locks', 'source-' + source_key), os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(source_guard, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(source_guard, fcntl.LOCK_EX | (fcntl.LOCK_NB if concurrent_cache else 0))
+    except BlockingIOError:
+        os.close(source_guard)
+        source_guard = None
     active()
     cache = safe_directory(safe_directory(root, 'cache'), cache_name)
-    sources = safe_directory(cache, '.fleet-runner-sources')
-    source_owner = safe_directory(sources, project)
-    marker = os.path.join(source_owner, '.fleet-source')
-    if os.path.lexists(marker):
-        if os.path.islink(marker) or open(marker).read() != project:
-            fail('source cache ownership differs')
-    elif os.listdir(source_owner):
-        fail('source cache has no ownership marker')
-    else:
-        with open(marker, 'x') as output:
-            output.write(project)
-    tree = os.path.join(source_owner, 'tree')
-    dirty = os.path.join(source_owner, 'dirty')
-    if os.path.lexists(dirty) or (os.path.lexists(tree) and not os.path.isdir(tree)) or os.path.islink(tree):
-        discard_tree()
-    # Include rsync's temporary replacement bytes, not just its final tree.
-    # Never evict another cache consumer's dependencies to make source fit.
-    reserve = 2 * total + 256 * len(entries)
-    if cache_bytes(cache) + reserve > cache_limit:
-        discard_tree()
-    if cache_bytes(cache) + reserve > cache_limit:
-        if not concurrent_cache and cache_bytes(cache) > cache_limit:
-            fail('named cache exceeds its limit; unrelated dependencies were preserved')
-        # The cache name is shared: dependency data is not ours to evict.
-        # Keep rsync/verification and the same source limits, but receive into
-        # disposable job scratch when its retained source copy cannot fit.
+    retained_tree = None
+    if source_guard is None:
         tree = os.path.join(job, 'source-rsync.noindex')
         dirty = os.path.join(job, 'source-rsync.dirty')
-        print('fleet-runner: source cache full; using disposable job source', file=sys.stderr)
+        print('fleet-runner: source cache busy; using disposable job source', file=sys.stderr)
+    else:
+        sources = safe_directory(cache, '.fleet-runner-sources')
+        source_owner = safe_directory(sources, project)
+        marker = os.path.join(source_owner, '.fleet-source')
+        if os.path.lexists(marker):
+            if os.path.islink(marker) or open(marker).read() != project:
+                fail('source cache ownership differs')
+        elif os.listdir(source_owner):
+            fail('source cache has no ownership marker')
+        else:
+            with open(marker, 'x') as output:
+                output.write(project)
+        retained_tree = tree = os.path.join(source_owner, 'tree')
+        dirty = os.path.join(source_owner, 'dirty')
+        if os.path.lexists(dirty) or (os.path.lexists(tree) and not os.path.isdir(tree)) or os.path.islink(tree):
+            discard_tree()
+        # Include rsync's temporary replacement bytes, not just its final tree.
+        # Never evict another cache consumer's dependencies to make source fit.
+        reserve = 2 * total + 256 * len(entries)
+        if cache_bytes(cache) + reserve > cache_limit:
+            discard_tree()
+        if cache_bytes(cache) + reserve > cache_limit:
+            if not concurrent_cache and cache_bytes(cache) > cache_limit:
+                fail('named cache exceeds its limit; unrelated dependencies were preserved')
+            # Retention cannot fit; this job's private copy needs no source lock.
+            tree = os.path.join(job, 'source-rsync.noindex')
+            dirty = os.path.join(job, 'source-rsync.dirty')
+            os.close(source_guard)
+            source_guard = None
+            print('fleet-runner: source cache full; using disposable job source', file=sys.stderr)
     with os.fdopen(os.open(dirty, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), 'w') as output:
         output.write('sync in progress')
-    if tree == os.path.join(source_owner, 'tree'):
+    if tree == retained_tree:
         safe_directory(source_owner, 'tree')
     else:
         safe_directory(job, 'source-rsync.noindex')
-    status = subprocess.call(['/usr/bin/rsync', *arguments[:-1], tree + '/'], pass_fds=(guard, source_guard, cache_usage_guard))
+    held_guards = (guard, cache_usage_guard) + (() if source_guard is None else (source_guard,))
+    # Apple forwards its local disk-cache option to the peer. Keep it sender
+    # local so older/GNU receivers keep their existing supported options.
+    receiver_arguments = [argument for argument in arguments[:-1] if argument != '--cache']
+    status = subprocess.call(['/usr/bin/rsync', *receiver_arguments, tree + '/'], pass_fds=held_guards)
     if status != 0:
         fail('rsync receiver failed')
     active()
@@ -244,15 +258,15 @@ try:
     # A concurrent neighbour may grow dependencies during our transfer. The
     # cap governs retention, not admission: discard only our own retained
     # source, after the independent execution copy has been fully verified.
-    if concurrent_cache and cache_overflow and tree == os.path.join(source_owner, 'tree'):
+    if concurrent_cache and cache_overflow and tree == retained_tree:
         discard_tree()
     with open(os.path.join(job, 'meta', 'rsync-verified'), 'x') as output:
         output.write(config['digest'])
     os.unlink(dirty)
 except Exception as error:
-    # Only the marked project source is ours to discard. A hard kill leaves
-    # dirty in place so the next admitted sync discards that same tree.
-    if source_owner is not None and tree is not None:
+    # Only our guarded retained source or this job's private source is disposable.
+    # A hard kill leaves dirty in place for its next guarded sync/normal job cleanup.
+    if tree is not None:
         discard_tree()
     print('fleet-runner: ' + str(error), file=sys.stderr)
     sys.exit(1)

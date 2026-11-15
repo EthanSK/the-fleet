@@ -162,6 +162,9 @@ struct WorkerDetailView: View {
                     if let expires = FleetDate.parse(reservation.expiresAt) {
                         FactRow(label: reservation.state == "active" ? "Renew by" : "Expired", value: FleetFormat.moment(expires, now: store.now))
                     }
+                    if let forwarding = reservation.forwarding {
+                        FactRow(label: "Forwarding", value: "\(FleetFormat.plural(forwarding.forwards.count, "port")) · \(forwarding.state)")
+                    }
                 }
                 if let detail = worker.status.detail { Text(detail).font(.callout).foregroundStyle(.secondary) }
                 if reservation.kind == "managed" {

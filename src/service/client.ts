@@ -4,7 +4,7 @@ import { request } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { ensurePrivateDir, expandHome, resolveStatePaths, type StatePaths } from '../paths.ts';
 import { HELP } from '../cli/main.ts';
@@ -146,7 +146,11 @@ export async function runClient(argv: readonly string[]): Promise<number> {
     if (process.platform !== 'darwin') throw new Error('Use your service manager to run bin/service-lock.py node bin/the-fleet.js service serve.');
     const directory = join(homedir(), 'Library', 'LaunchAgents'); mkdirSync(directory, { recursive: true }); ensurePrivateDir(paths.home);
     const plist = join(directory, 'org.the-fleet.service.plist');
-    const args = ['python3', lockProgram, process.execPath, bin, 'service', 'serve'];
+    const python = spawnSync('python3', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' });
+    if (python.error) throw python.error;
+    const pythonExecutable = python.stdout.trim();
+    if (python.status !== 0 || !isAbsolute(pythonExecutable)) throw new Error('Python 3 must be available as an absolute executable on PATH.');
+    const args = [pythonExecutable, lockProgram, process.execPath, bin, 'service', 'serve']; // Bug: launchd resolves a relative python3 using its system PATH, which missed Homebrew and made fresh bootstrap fail with error 5. Fix: record the CLI's absolute Python executable, as this already does for Node.
     writeFileSync(plist, `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>org.the-fleet.service</string><key>ProgramArguments</key><array>${args.map((a) => `<string>${xml(a)}</string>`).join('')}</array><key>EnvironmentVariables</key><dict><key>THE_FLEET_HOME</key><string>${xml(paths.home)}</string><key>PATH</key><string>${xml(process.env['PATH'] ?? '/usr/bin:/bin')}</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${xml(join(paths.home, 'service.log'))}</string><key>StandardErrorPath</key><string>${xml(join(paths.home, 'service.log'))}</string></dict></plist>\n`, { mode: 0o600 });
     print({ installed: plist, load: `launchctl bootstrap gui/$(id -u) '${plist}'` }); return 0;
   }
@@ -165,6 +169,26 @@ export async function runClient(argv: readonly string[]): Promise<number> {
     print(await callApi(paths, 'POST', '/v1/reservations', { owner, label: argument(argv, '--label') ?? 'External SSH work', machines: argument(argv, '--machines')?.split(','), ttlSeconds: Number(argument(argv, '--ttl') ?? 180), claim: { mode: argv.includes('--drain') ? 'drain' : argv.includes('--shared') ? 'shared' : 'exclusive', resources: argument(argv, '--resources')?.split(',') ?? [], ...(argument(argv, '--workload') === undefined ? {} : { workload: argument(argv, '--workload') }) } })); return 0;
   }
   if (argv[0] === 'renew' || argv[0] === 'release' || argv[0] === 'activate') { print(await callApi(paths, 'POST', `/v1/${argv[0]}`, { id: argument(argv, '--id'), token: argument(argv, '--token'), ttlSeconds: Number(argument(argv, '--ttl') ?? 180), workStopped: argv.includes('--work-stopped') })); return 0; }
+  if (argv[0] === 'forward') {
+    const stop = argv[1] === 'stop';
+    // The closed parser keeps a mistyped port list from silently forwarding nothing or something else.
+    const args = parseArgs(argv.slice(stop ? 2 : 1), { values: ['id', 'token', 'ports'] });
+    expectPositionals(args, [], 'the-fleet forward [stop] --id <id> --token <token> [--ports <local[:remote],...>]');
+    if (args.passthrough.length) throw usageError('Forwarding does not accept arguments after --.');
+    const id = single(args, 'id'), token = single(args, 'token'), ports = single(args, 'ports');
+    if (id === undefined || token === undefined) throw usageError('--id and --token are required.');
+    if (stop) {
+      if (ports !== undefined) throw usageError('forward stop ends every forward of the reservation; omit --ports.');
+      print(await callApi(paths, 'POST', '/v1/forwards/stop', { id, token })); return 0;
+    }
+    if (ports === undefined) throw usageError('--ports is required: a comma-separated list of local[:remote] ports.');
+    const forwards = ports.split(',').map((entry) => {
+      if (!/^\d+(?::\d+)?$/.test(entry)) throw usageError('Each forward must be a local port or local:remote pair.');
+      const [local = '', remote = local] = entry.split(':');
+      return { localPort: Number(local), remotePort: Number(remote) };
+    });
+    print(await callApi(paths, 'POST', '/v1/forwards', { id, token, forwards })); return 0;
+  }
   if (argv[0] === 'recover-reservations') { print(await callApi(paths, 'POST', '/v1/recover', {})); return 0; }
   if (argv[0] === 'rpc') {
     const input = argv[3] ? JSON.parse(readFileSync(argv[3] === '-' ? 0 : argv[3], 'utf8')) : undefined;

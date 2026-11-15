@@ -27,6 +27,8 @@ Coordinator
   the-fleet renew --id <id> --token <token> [--ttl <seconds>]
   the-fleet release --id <id> --token <token> [--work-stopped]
   the-fleet activate --id <id> --token <token>
+  the-fleet forward --id <id> --token <token> --ports <local[:remote],...>
+  the-fleet forward stop --id <id> --token <token>
   the-fleet recover-reservations
   the-fleet service status | install | stop
   the-fleet migrate-home [--dry-run]

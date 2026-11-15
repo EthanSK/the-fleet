@@ -1,5 +1,7 @@
 # Fleet Runner lessons
 
+- launchd resolves a relative program using its system PATH, rather than the job's EnvironmentVariables PATH. Record Python's absolute sys.executable during service installation, as the CLI already does for Node with process.execPath. Fresh bootstrap rejected relative python3 with error 5 on a Homebrew controller; an absolute interpreter registered successfully. Resolve through Python itself so a pyenv shim is not mistaken for the interpreter.
+
 - A registered run's --source override changes the files, not the registered recipe. Qualify a changed recipe from a worktree with one-time submit using its full manifest. Packaging profiles must include every input the packager reads, including LICENSE and LICENSING.md; checking source alone missed the latter input until a real worker build exercised it.
 
 - Diagnose a missing log tail by comparing the controller log, retained worker log and producer's own saved report. Equal worker/controller bytes locate loss before collection. On POSIX, Node writes to pipes/FIFOs asynchronously: writableNeedDrain=false does not prove queued writes completed before process.exit. An Nx 23.3.1 probe lost the tail of an 11,008-byte FIFO write at exactly 8,192 bytes; awaiting the write callback preserved it. Fix producer completion rather than adding timed padding or assuming receipt success proves a complete console report.

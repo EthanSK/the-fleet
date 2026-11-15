@@ -3,6 +3,7 @@
 // this instance.
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { parseClaim } from '../run/capacity.ts';
+import { parseForwards } from './forwarding.ts';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -317,6 +318,15 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       if (input['workStopped'] !== undefined && typeof input['workStopped'] !== 'boolean') throw usageError('workStopped must be boolean.');
       await coordinator.release(id, token, input['workStopped'] === true); return json(response, 200, { released: true });
     }
+    if (method === 'POST' && (path === '/v1/forwards' || path === '/v1/forwards/stop')) {
+      if (stopping) throw new FleetError('machineBusy', 'The Fleet is stopping.');
+      const input = await body(request), id = text(input['id'], 'id'), token = text(input['token'], 'token');
+      const allowed = path === '/v1/forwards' ? ['id', 'token', 'forwards'] : ['id', 'token'];
+      for (const key of Object.keys(input)) if (!allowed.includes(key)) throw usageError(`Unknown forwarding field: ${key}`);
+      if (path === '/v1/forwards/stop') { await coordinator.stopForwarding(id, token); return json(response, 200, { stopped: true }); }
+      if (stopping) throw new FleetError('machineBusy', 'The Fleet is stopping.');
+      return json(response, 200, { forwarding: await coordinator.forward(id, token, parseForwards(input['forwards'])) });
+    }
 
     // ---- worker settings (machines.json) and Agent Bridge pairings
     if (method === 'GET' && path === '/v1/config') return json(response, 200, configurationView(paths));
@@ -447,7 +457,11 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
     }
     if (method === 'POST' && path === '/v1/stop') {
       if (coordinator.maintenanceInProgress || [...operations.values()].some((op) => op.status === 'running')) throw new FleetError('machineBusy', 'Jobs are still running. Cancel them before stopping The Fleet.');
-      stopping = true; json(response, 200, { stopping: true }); server.close(); return;
+      stopping = true;
+      await coordinator.stopAllForwarding();
+      json(response, 200, { stopping: true });
+      server.close();
+      return;
     }
     json(response, 404, { error: 'Unknown API route.', code: 'unknown-route' });
   }
@@ -470,6 +484,9 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
     stopping = true;
     for (const op of operations.values()) if (op.status === 'running') { op.cancelRequested = true; op.interrupts.trigger(); }
     await Promise.allSettled([...pending]);
+    // Owned ssh forwards stop with the service; reservations keep their
+    // ownership, and their owners re-request forwards from the next coordinator.
+    await coordinator.stopAllForwarding();
     await new Promise<void>((done) => server.close(() => done()));
   } };
 }

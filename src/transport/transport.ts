@@ -27,12 +27,20 @@ export interface RemoteProcess {
   kill(signal?: NodeJS.Signals): void;
 }
 
+/** One loopback-to-loopback port forward: this computer's 127.0.0.1:localPort reaches the worker's 127.0.0.1:remotePort. */
+export interface PortForward {
+  readonly localPort: number;
+  readonly remotePort: number;
+}
+
 export interface Transport {
   /** Human description without addresses, e.g. "Agent Bridge target Mac-Mini (internet route)". */
   readonly description: string;
   start(remoteCommand: string): RemoteProcess;
   /** Rsync uses this same paired SSH route, with a guarded remote receiver. */
   startRsync?(sourceDirectory: string, receiverCommand: string): RemoteProcess;
+  /** Holds loopback port forwards over this same paired route; the process lives until killed. */
+  startForwarding?(forwards: readonly PortForward[]): RemoteProcess;
   /** True when a failed process's stderr shows the connection itself failed. */
   isConnectionFailure(exit: RemoteExit, stderr: string): boolean;
 }

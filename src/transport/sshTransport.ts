@@ -17,8 +17,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { Machine } from '../schema/machines.ts';
 import { loadAgentBridgeRoute, type AgentBridgeRoute } from './agentBridgeConfig.ts';
-import { wrapChild, type RemoteExit, type RemoteProcess, type Transport } from './transport.ts';
+import { wrapChild, type PortForward, type RemoteExit, type RemoteProcess, type Transport } from './transport.ts';
 import { shellQuote } from './shellQuote.ts';
+import { rsyncFileCacheArguments } from './rsyncArguments.ts';
+
+export const FORWARDING_READY = 'FLEET_FORWARDING_READY';
 
 // Client-side connection failure phrases, matching agent-bridge's
 // _ssh_is_connection_failure. Exit 255 alone is ambiguous: the remote command
@@ -37,9 +40,11 @@ const CONNECTION_FAILURE_PHRASES = [
   'Operation timed out',
 ];
 
-export function sshArguments(route: AgentBridgeRoute): string[] {
+export function sshArguments(route: AgentBridgeRoute, options: { readonly compress?: boolean; readonly forwards?: readonly PortForward[] } = {}): string[] {
   const args = [
-    '-C',
+    // Forwarded browser traffic is mostly already-compressed media; compressing
+    // it again costs CPU on both ends for nothing, so forwards opt out.
+    ...(options.compress === false ? [] : ['-C']),
     '-o', 'StrictHostKeyChecking=accept-new',
     '-o', 'ConnectTimeout=10',
     '-o', 'LogLevel=ERROR',
@@ -50,8 +55,25 @@ export function sshArguments(route: AgentBridgeRoute): string[] {
     '-p', String(route.port),
   ];
   if (route.identityFile !== undefined) args.push('-i', route.identityFile, '-o', 'IdentitiesOnly=yes');
+  if (options.forwards !== undefined) {
+    args.push('-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+      '-o', 'PermitLocalCommand=yes', '-o', `LocalCommand=printf '${FORWARDING_READY}\\n'`); // OpenSSH runs LocalCommand after binding its forwards. Use a dedicated session so its lifetime follows the reservation.
+    for (const { localPort, remotePort } of options.forwards) {
+      args.push('-L', `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`);
+    }
+  }
   args.push(`${route.user}@${route.host}`);
   return args;
+}
+
+/**
+ * `ssh -N` holding loopback forwards. Both ends bind 127.0.0.1 explicitly:
+ * nothing on this Mac's LAN can reach the worker's services through it, and the
+ * worker side only reaches its own loopback services. ExitOnForwardFailure makes
+ * an occupied local port a visible exit instead of a half-working session.
+ */
+export function forwardingArguments(route: AgentBridgeRoute, forwards: readonly PortForward[]): string[] {
+  return sshArguments(route, { compress: false, forwards });
 }
 
 export class SshTransport implements Transport {
@@ -77,10 +99,14 @@ export class SshTransport implements Transport {
     // Only the private selected-source directory is traversed recursively.
     const rsh = [process.execPath, fileURLToPath(new URL('./rsyncSsh.ts', import.meta.url))].map(shellQuote).join(' ');
     return wrapChild(spawn('/usr/bin/rsync', [
-      '-rlptc', '--delete', '--stats', '--no-owner', '--no-group',
+      '-rlptc', '--delete', '--stats', '--no-owner', '--no-group', ...rsyncFileCacheArguments(),
       '-e', rsh, '--rsync-path', 'fleet-runner-receiver',
       `${sourceDirectory}/`, 'fleet-worker:fleet-runner-source',
     ], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FLEET_RUNNER_RSYNC_SSH_ARGS: JSON.stringify(sshArguments(this.route)), FLEET_RUNNER_RSYNC_RECEIVER: receiverCommand } }));
+  }
+
+  startForwarding(forwards: readonly PortForward[]): RemoteProcess {
+    return wrapChild(spawn('ssh', forwardingArguments(this.route, forwards), { stdio: ['pipe', 'pipe', 'pipe'] }));
   }
 
   isConnectionFailure(exit: RemoteExit, stderr: string): boolean {

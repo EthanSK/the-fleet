@@ -132,6 +132,21 @@ public struct Reservation: Codable, Sendable, Equatable, Identifiable {
     public let expiresAt: String?
     /// "active", "expired" or "unverified".
     public let state: String
+    /// Loopback ssh forwards the coordinator holds for this reservation; absent from older services and reservations without forwards.
+    public let forwarding: ReservationForwarding?
+}
+
+public struct ReservationForwarding: Codable, Sendable, Equatable {
+    public struct Forward: Codable, Sendable, Equatable, Hashable {
+        public let localPort: Int
+        public let remotePort: Int
+    }
+    /// "connecting", "connected", "reconnecting", "failed" or "stopped".
+    public let state: String
+    public let forwards: [Forward]
+    public let startedAt: String
+    public let attempts: Int
+    public let detail: String?
 }
 
 // MARK: - Worker settings (/v1/config, /v1/machines)

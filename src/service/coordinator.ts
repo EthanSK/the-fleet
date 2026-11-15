@@ -12,6 +12,8 @@ import { FleetError, RunNotStartedError } from '../errors.ts';
 import type { Machine } from '../schema/machines.ts';
 import { loadAgentBridgeRoute, type AgentBridgeRoute } from '../transport/agentBridgeConfig.ts';
 import { SshTransport } from '../transport/sshTransport.ts';
+import type { PortForward, RemoteProcess } from '../transport/transport.ts';
+import { PortForwarding, type ForwardingOptions, type PublicForwarding } from './forwarding.ts';
 import { fetchPreflight, fetchStatus, runControl, type RemoteStatus, type ControlResult } from '../run/remoteChecks.ts';
 import { evaluatePreflight, type PreflightReport } from '../run/preflight.ts';
 import { assessMemory } from '../run/memoryAssessment.ts';
@@ -42,7 +44,9 @@ export interface Reservation {
   tokenHash: string;
   state: 'active' | 'expired' | 'unverified';
 }
-export type PublicReservation = Omit<Reservation, 'tokenHash'>;
+export type PublicReservation = Omit<Reservation, 'tokenHash'> & { readonly forwarding?: PublicForwarding };
+/** Paired route and worker paths for an external reservation owner. */
+export type ReservationConnection = AgentBridgeRoute & Pick<Machine, 'remoteRoot' | 'pathPrepend'> & { readonly dockerContext?: string };
 export interface CoordinatorDependencies {
   readonly machines: () => readonly Machine[];
   readonly preferredMachine?: () => string | undefined;
@@ -52,6 +56,10 @@ export interface CoordinatorDependencies {
   readonly now: () => number;
   readonly route: (machine: Machine) => AgentBridgeRoute;
   readonly cleanupStale?: (machine: Machine, expectedJobId: string) => Promise<ControlResult>;
+  /** Starts one ssh session holding the forwards; absent when this coordinator cannot forward (tests without a transport). */
+  readonly forward?: (machine: Machine, forwards: readonly PortForward[]) => RemoteProcess;
+  /** Test-only timing for forwarding readiness and reconnection. */
+  readonly forwardingOptions?: Omit<ForwardingOptions, 'now'>;
 }
 
 export function productionDependencies(paths: StatePaths): CoordinatorDependencies {
@@ -74,6 +82,7 @@ export function productionDependencies(paths: StatePaths): CoordinatorDependenci
     now: Date.now,
     cleanupStale: (machine, jobId) => runControl(SshTransport.forMachine(machine), machine, 'reap-stale', jobId),
     route: (machine) => loadAgentBridgeRoute(machine.transport.target, machine.transport.configPath),
+    forward: (machine, forwards) => SshTransport.forMachine(machine).startForwarding(forwards),
   };
 }
 
@@ -97,6 +106,9 @@ export interface MaintenanceResult {
 
 export class Coordinator {
   private readonly reservations = new Map<string, Reservation>();
+  /** Live ssh forwards by reservation id. Not persisted: a restarted service holds no ssh children, so owners re-request them. */
+  private readonly forwardings = new Map<string, PortForwarding>();
+  private readonly releasing = new Set<string>();
   private readonly observations = new Map<string, { at: number; value: Promise<WorkerObservation> }>();
   /** Last confirmed physical identity per worker id, for synchronous ownership checks. */
   private readonly fingerprints = new Map<string, string>();
@@ -193,19 +205,25 @@ export class Coordinator {
     return value;
   }
 
+  /** The public lease plus its live forwards, when it holds any. */
+  private view(lease: Reservation): PublicReservation {
+    const forwarding = this.forwardings.get(lease.id);
+    return { ...publicReservation(lease), ...(forwarding === undefined ? {} : { forwarding: forwarding.view() }) };
+  }
+
   /** Every reservation for this worker id or its last confirmed physical identity. */
   reservationsFor(machine: Machine): PublicReservation[] {
     this.expire();
     const fingerprint = this.fingerprints.get(machine.id);
     return [...this.reservations.values()]
       .filter((lease) => lease.machineId === machine.id || (fingerprint !== undefined && lease.fingerprint === fingerprint))
-      .map(publicReservation);
+      .map((lease) => this.view(lease));
   }
 
   /** A managed run's reservation uses its operation id, which links the operation to its worker. */
   reservationById(id: string): PublicReservation | undefined {
     const lease = this.reservations.get(id);
-    return lease ? publicReservation(lease) : undefined;
+    return lease ? this.view(lease) : undefined;
   }
 
   /** Synchronous: call immediately before writing changed worker settings. */
@@ -269,16 +287,16 @@ export class Coordinator {
           id: machine.id, aliases: machine.aliases, description: machine.description,
           observedAt, available: refusals.length === 0, reasons: refusals,
           warnings: decision?.warnings.map((finding) => finding.message) ?? [],
-          assignments: assignments.map(publicReservation),
+          assignments: assignments.map((lease) => this.view(lease)),
           capacity: { limit: machine.limits.maxConcurrentJobs, used, free: reservation || report?.lock.state !== 'free' ? 0 : Math.max(0, machine.limits.maxConcurrentJobs - used), draining: assignments.some((lease) => lease.claim?.mode === 'drain'), e2e: { limit: e2eLimit(machine), used: report?.fingerprint ? this.e2eUsed(report.fingerprint, report) : 0 } },
           ...(report ? { health: { ...report, tools: Object.fromEntries(report.tools) } } : {}),
           ...(report ? { memoryAssessment: assessMemory(report) } : {}),
           ...(this.maintenance.has(machine.id) ? { maintenance: this.maintenance.get(machine.id) } : {}),
           ...(recent ? { recentJobs: recent.jobs, caches: recent.caches, jobsKiB: recent.jobsKiB } : {}),
-          ...(reservation ? { reservation: publicReservation(reservation) } : {}),
+          ...(reservation ? { reservation: this.view(reservation) } : {}),
         };
       }),
-      reservations: [...this.reservations.values()].map(publicReservation),
+      reservations: [...this.reservations.values()].map((lease) => this.view(lease)),
     };
   }
 
@@ -406,9 +424,76 @@ export class Coordinator {
       };
       this.reservations.set(reservation.id, reservation);
       this.persist();
-      return { reservation: publicReservation(reservation), token, ready: claim.mode !== 'drain', ...(claim.mode === 'drain' ? {} : { connection: { ...route } }), health: { ...report, tools: Object.fromEntries(report.tools) }, note: 'Keep this reservation while using your own SSH. Expiry retains ownership until an explicit safe release.' };
+      return { reservation: publicReservation(reservation), token, ready: claim.mode !== 'drain', ...(claim.mode === 'drain' ? {} : { connection: this.connection(machine, route) }), health: { ...report, tools: Object.fromEntries(report.tools) }, note: 'Keep this reservation while using your own SSH. Expiry retains ownership until an explicit safe release.' };
     }
     throw new FleetError('machineBusy', 'No available worker. Check state for current load and owners.');
+  }
+
+  /** Supplies worker paths and the Docker context used for externally managed containers. */
+  private connection(machine: Machine, route: AgentBridgeRoute): ReservationConnection {
+    const dockerContext = machine.env['DOCKER_CONTEXT'];
+    return { ...route, remoteRoot: machine.remoteRoot, pathPrepend: machine.pathPrepend,
+      ...(dockerContext === undefined ? {} : { dockerContext }) }; // Other worker settings can contain credentials and remain private.
+  }
+
+  /**
+   * Starts the loopback forwards owned by one external reservation.
+   * Readiness is awaited here so the caller learns about an occupied local port
+   * or an unreachable worker immediately; the session then stays with the
+   * coordinator until stopForwarding, release or a service restart.
+   */
+  async forward(id: string, token: string, forwards: readonly PortForward[]): Promise<PublicForwarding> {
+    const lease = this.authorized(id, token);
+    if (this.releasing.has(id)) throw new FleetError('machineBusy', 'The reservation is being released.');
+    if (lease.kind !== 'external' || lease.claim?.mode === 'drain') throw new FleetError('usage', 'Only an external reservation with a connection can own port forwards.');
+    const machine = this.dependencies.machines().find((candidate) => candidate.id === lease.machineId);
+    if (!machine) throw new FleetError('machineBusy', 'Worker configuration changed; preserve the reservation for recovery.');
+    const spawn = this.dependencies.forward;
+    if (!spawn) throw new FleetError('usage', 'This coordinator cannot start port forwards.');
+    const existing = this.forwardings.get(id);
+    if (existing !== undefined) {
+      if (existing.forwards.length !== forwards.length || existing.forwards.some((held) =>
+        !forwards.some((wanted) => held.localPort === wanted.localPort && held.remotePort === wanted.remotePort))) {
+        throw new FleetError('machineBusy', 'Stop the reservation’s existing forwards before changing its ports.');
+      }
+      if (existing.view().state === 'connecting') return existing.start();
+      return existing.view();
+    }
+    for (const [otherId, other] of this.forwardings) {
+      if (otherId === id || other.view().state === 'stopped') continue;
+      const clash = other.forwards.find((held) => forwards.some((wanted) => wanted.localPort === held.localPort));
+      if (clash === undefined) continue;
+      const owner = this.reservations.get(otherId);
+      throw new FleetError('machineBusy', `Local port ${clash.localPort} is already forwarded by reservation ${otherId}${owner === undefined ? '' : ` (${owner.owner}: ${owner.label})`}.`);
+    }
+    // A settings editor may have changed the route while the owner decided; the
+    // session must use the current pairing, like a run admitted after a probe.
+    if (!this.destinationIsCurrent(machine)) throw new FleetError('machineBusy', `${machine.id}'s settings changed. Nothing was forwarded.`);
+    const forwarding = new PortForwarding(forwards, () => spawn(machine, forwards), { ...this.dependencies.forwardingOptions, now: this.dependencies.now });
+    this.forwardings.set(id, forwarding);
+    try {
+      return await forwarding.start();
+    } catch (error) {
+      if (this.forwardings.get(id) === forwarding) this.forwardings.delete(id);
+      throw error;
+    }
+  }
+
+  async stopForwarding(id: string, token: string): Promise<void> {
+    this.authorized(id, token);
+    await this.stopForwardsOf(id);
+  }
+
+  /** Service shutdown: ssh children would otherwise outlive the coordinator and hold the local ports. */
+  async stopAllForwarding(): Promise<void> {
+    await Promise.all([...this.forwardings.keys()].map((id) => this.stopForwardsOf(id)));
+  }
+
+  private async stopForwardsOf(id: string): Promise<void> {
+    const forwarding = this.forwardings.get(id);
+    if (forwarding === undefined) return;
+    await forwarding.stop();
+    if (this.forwardings.get(id) === forwarding) this.forwardings.delete(id);
   }
 
   async activate(id: string, token: string): Promise<unknown> {
@@ -421,7 +506,7 @@ export class Coordinator {
       || this.claims(lease.fingerprint).some((other) => other.id !== id)) return { ready: false, reservation: publicReservation(lease) };
     lease.claim = { mode: 'exclusive', resources: lease.claim.resources };
     this.persist();
-    return { ready: true, reservation: publicReservation(lease), connection: this.dependencies.route(machine) };
+    return { ready: true, reservation: publicReservation(lease), connection: this.connection(machine, this.dependencies.route(machine)) };
   }
 
   renew(id: string, token: string, ttlSeconds = 180): PublicReservation {
@@ -463,8 +548,18 @@ export class Coordinator {
     if (!report?.complete || report.fingerprint !== lease.fingerprint || (!(lease.claim?.mode === 'shared' && workStopped) && !this.remoteIdle(report))) {
       throw new FleetError('machineBusy', 'Worker is busy or its state is unverified. Stop your work and inspect it before releasing.');
     }
-    this.reservations.delete(id);
-    this.persist();
+    // Forwards end with their owner, and only after ssh has exited: a released
+    // worker must not still be reachable through this computer's loopback.
+    this.authorized(id, token);
+    if (this.releasing.has(id)) throw new FleetError('machineBusy', 'The reservation is being released.');
+    this.releasing.add(id); // Keep new forwards out while SSH is closing and before the reservation disappears.
+    try {
+      await this.stopForwardsOf(id);
+      this.reservations.delete(id);
+      this.persist();
+    } finally {
+      this.releasing.delete(id);
+    }
   }
 
   async runOne(owner: string, operation: string, request: RunRequest): Promise<RunResult | null> {
