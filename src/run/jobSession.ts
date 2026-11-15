@@ -37,6 +37,7 @@ export class JobSession {
   private artifactResolve: (() => void) | undefined;
   private artifactDone: Promise<void> | undefined;
   private artifactWriteError: Error | undefined;
+  private artifactEnded = false;
   jobEnded = false;
 
   constructor(transport: Transport, command: string, nonce: string, handlers: JobSessionHandlers) {
@@ -49,14 +50,21 @@ export class JobSession {
       this.stderrTail = (this.stderrTail + chunk.toString('utf8')).slice(-4000);
       handlers.onStderr(chunk);
     });
-    this.exited = this.process.exited.then((exit) => {
+    this.exited = this.process.exited.then(async (exit) => {
       this.exitedValue = exit;
       if (this.waiter) {
         const waiter = this.waiter;
         this.waiter = undefined;
         waiter.reject(this.connectionLostError(exit));
       }
-      this.artifactResolve?.();
+      // A disconnected archive is still owned by this session. Close its
+      // writer before callers clean up; resolving here used to leak the fd.
+      if (this.artifactDone && !this.artifactEnded) {
+        this.artifactWriteError ??= this.connectionLostError(exit);
+        if (this.artifactStream) this.artifactStream.destroy(this.artifactWriteError);
+        else this.artifactResolve?.();
+      }
+      await this.artifactDone;
       return exit;
     });
   }
@@ -147,10 +155,9 @@ export class JobSession {
         this.artifactStream?.write(event.data);
         return;
       case 'artifact-end':
+        this.artifactEnded = true;
         if (this.artifactStream) {
-          const stream = this.artifactStream;
-          this.artifactStream = undefined;
-          stream.end(() => this.artifactResolve?.());
+          this.artifactStream.end();
         } else {
           this.artifactResolve?.();
         }
@@ -163,16 +170,22 @@ export class JobSession {
   }
 
   private startArtifactCapture(): void {
+    this.artifactEnded = false;
     this.artifactDone = new Promise<void>((resolve) => {
       this.artifactResolve = resolve;
     });
     if (this.artifactPath !== undefined) {
-      this.artifactStream = createWriteStream(this.artifactPath, { mode: 0o600 });
+      const stream = createWriteStream(this.artifactPath, { mode: 0o600 });
+      this.artifactStream = stream;
       // A full controller disk must fail this return and send NACK, rather
       // than crash the shared coordinator and abandon unrelated jobs.
-      this.artifactStream.once('error', (error: Error) => {
+      stream.once('error', (error: Error) => {
         this.artifactWriteError = error;
-        this.artifactStream = undefined;
+      });
+      // 'finish' can precede descriptor closure. Extraction and failed-copy
+      // cleanup must wait for 'close', including open/write errors.
+      stream.once('close', () => {
+        if (this.artifactStream === stream) this.artifactStream = undefined;
         this.artifactResolve?.();
       });
     }
