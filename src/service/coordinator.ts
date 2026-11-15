@@ -400,7 +400,10 @@ export class Coordinator {
       const report = observation?.report;
       if (!report?.fingerprint || report.fingerprint === local) continue;
       if (claim.mode !== 'drain') {
-        const decision = evaluatePreflight(report, machine, undefined, { ignoreHeavyProcesses: false, nowEpoch: this.dependencies.now() / 1000 });
+        // Direct-SSH reservations do not create managed result archives.
+        // Preserve their existing admission policy while managed state/runs
+        // expose the supervisor's pending-output cap through common preflight.
+        const decision = evaluatePreflight(report, machine, undefined, { ignoreHeavyProcesses: false, nowEpoch: this.dependencies.now() / 1000, checkPendingArtifacts: false });
         for (const finding of decision.refusals) if (finding.kind === 'disk') {
           reportDiskSpaceProblem(onDiskSpaceProblem, { machineId: machine.id, phase: 'admission', message: finding.message });
         }

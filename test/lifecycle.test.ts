@@ -12,6 +12,7 @@ import { supervisorCommand, uploadCommand } from '../src/remote/remoteScripts.ts
 import { tarStream } from '../src/snapshot/tar.ts';
 import { JobSession } from '../src/run/jobSession.ts';
 import { recoverArtifacts } from '../src/run/recoverArtifacts.ts';
+import { RunNotStartedError } from '../src/errors.ts';
 import { execFileSync } from 'node:child_process';
 import { shellQuote } from '../src/transport/shellQuote.ts';
 import type { RemoteProcess } from '../src/transport/transport.ts';
@@ -547,9 +548,9 @@ test('pending archive count refuses admission instead of deleting the only resul
   writeFiles(env.remoteRoot, { 'jobs/retained/.fleet-job': '', 'jobs/retained/artifacts.pending': '' });
   try {
     const machine = testMachine({ limits: { ...testMachine().limits, keepJobs: 1 } });
-    const run = await runProfile({ ...request, machine });
-    assert.equal(run.receipt.outcome, 'error');
-    assert.match(run.receipt.summary, /recover pending artifacts/);
+    await assert.rejects(() => runProfile({ ...request, machine }), (error: unknown) => error instanceof RunNotStartedError
+      && error.kind === 'machineBusy' && /recover pending artifacts/.test(error.message));
+    assert.equal(env.transport.commands.some(command => command.includes('fleet-runner-supervisor')), false);
     assert.equal(existsSync(join(env.remoteRoot, 'jobs/retained/artifacts.pending')), true);
   } finally { env.cleanup(); }
 });

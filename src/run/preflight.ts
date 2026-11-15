@@ -50,6 +50,8 @@ export interface PreflightReport {
   /** Display only: OS release, such as "26.1" on macOS. */
   readonly osVersion?: string;
   readonly rootExists: boolean;
+  /** Unacknowledged result archives; separate from active job slots. */
+  readonly pendingArtifacts?: number;
   readonly diskFreeBytes?: number;
   readonly memTotalBytes?: number;
   readonly memAvailableBytes?: number;
@@ -129,6 +131,7 @@ export function parsePreflight(text: string): PreflightReport {
   const memAvailableBytes = optionalNumber(values.get('mem_available_bytes'));
   const memPressureLevel = optionalNumber(values.get('mem_pressure_level'));
   const cpuCount = optionalNumber(values.get('cpu_count'));
+  const pendingArtifacts = optionalNumber(values.get('pending_artifacts'));
   const loadAverage = values.get('load_average')?.split(/\s+/).map(Number).filter(Number.isFinite);
   const optionalText = (key: string): Record<string, string> => {
     const value = values.get(key);
@@ -158,6 +161,7 @@ export function parsePreflight(text: string): PreflightReport {
     ...renamed('os_version', 'osVersion'),
     ...(bashVersion ? { bashVersion } : {}),
     rootExists: values.get('root_exists') === '1',
+    ...(pendingArtifacts !== undefined && Number.isInteger(pendingArtifacts) && pendingArtifacts >= 0 ? { pendingArtifacts } : {}),
     ...(diskFreeKiB === undefined ? {} : { diskFreeBytes: diskFreeKiB * 1024 }),
     ...(memTotalBytes === undefined ? {} : { memTotalBytes }),
     ...(memAvailableBytes === undefined ? {} : { memAvailableBytes }),
@@ -230,7 +234,7 @@ export function evaluatePreflight(
   report: PreflightReport,
   machine: Machine,
   profile: Profile | undefined,
-  options: { readonly ignoreHeavyProcesses: boolean; readonly nowEpoch: number },
+  options: { readonly ignoreHeavyProcesses: boolean; readonly nowEpoch: number; readonly checkPendingArtifacts?: boolean },
 ): PreflightDecision {
   const refusals: PreflightFinding[] = [];
   const warnings: PreflightFinding[] = [];
@@ -240,6 +244,11 @@ export function evaluatePreflight(
   }
   const lock = describeLock(machine, report.lock, options.nowEpoch);
   if (lock) refusals.push(lock);
+  // Match the worker's existing cap before ranking can admit this candidate.
+  // The worker rechecks it for changes after this read-only observation.
+  if (options.checkPendingArtifacts !== false && report.pendingArtifacts !== undefined && report.pendingArtifacts >= machine.limits.keepJobs) {
+    refusals.push({ kind: 'busy', message: `${machine.id}: recover pending artifacts before starting another job` });
+  }
   const shared = profile === undefined || profileClaim(profile, machine).mode === 'shared';
   const sharedLocks = (report.sharedLocks ?? []).filter((entry) => entry.state !== 'free');
   if (sharedLocks.length && (!shared || sharedLocks.length >= machine.limits.maxConcurrentJobs || sharedLocks.some((entry) => entry.jobId === '-'))) {

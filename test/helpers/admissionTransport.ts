@@ -8,6 +8,7 @@ import { LocalShellTransport } from './localShellTransport.ts';
 
 export class AdmissionTransport extends LocalShellTransport {
   admission: 'normal' | 'busy' | 'uncertain' = 'normal';
+  loseResult = false;
   admissions = 0;
   onBusy: (() => void) | undefined;
   fingerprint: string;
@@ -29,6 +30,29 @@ export class AdmissionTransport extends LocalShellTransport {
       if (this.admission === 'uncertain') return super.start("printf '@@FR ERROR fixture\\n'");
     }
     const process = super.start(command);
+    if (command.includes('fleet-runner-supervisor') && this.loseResult) {
+      // Extraction of the result-loss fixture from orderedMachines.test.ts.
+      // The real command runs; its result and cleanup confirmations are lost.
+      let buffered = '', failed = false;
+      const stdout = process.stdout.pipe(new Transform({ transform(chunk: Buffer, _encoding, callback) {
+        if (!failed) {
+          buffered += chunk.toString('utf8');
+          let newline: number;
+          while ((newline = buffered.indexOf('\n')) >= 0) {
+            const line = buffered.slice(0, newline + 1); buffered = buffered.slice(newline + 1);
+            if (line.startsWith('@@FR RESULT ')) {
+              // A lost connection also closes its input. Otherwise an archive
+              // sender correctly waits for ACK instead of ending the session.
+              process.stdin.end();
+              failed = true; buffered = ''; break;
+            }
+            this.push(line);
+          }
+        }
+        callback();
+      } }));
+      return { ...process, stdout };
+    }
     if (!command.includes('fleet-runner-preflight')) return process;
     let output = '';
     const fingerprint = this.fingerprint;

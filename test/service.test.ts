@@ -29,9 +29,22 @@ function fixture() {
     execute: async () => { throw new Error('not executed by reservation tests'); },
   };
   return { paths, dependencies, coordinator: new Coordinator(paths, dependencies),
+    pending: () => { report = { ...report, pendingArtifacts: machine.limits.keepJobs }; },
     expire: () => { now += 400_000; }, busy: () => { report = { ...report, lock: { state: 'busy', jobId: 'another-job', label: 'busy', orphaned: false } }; },
     cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+test('pending results block managed availability without blocking direct SSH reservations', async () => {
+  const f = fixture();
+  f.pending();
+  try {
+    const state = await f.coordinator.state(true) as { workers: { available: boolean; reasons: string[] }[] };
+    assert.equal(state.workers[0]?.available, false);
+    assert.match(state.workers[0]?.reasons.join(' ') ?? '', /recover pending artifacts/);
+    const lease = await f.coordinator.reserve('owner', 'external SSH', ['mini']) as { reservation: { id: string }; token: string };
+    await f.coordinator.release(lease.reservation.id, lease.token);
+  } finally { f.cleanup(); }
+});
 
 test('concurrent apps and aliases cannot both reserve one physical machine', async () => {
   const f = fixture();

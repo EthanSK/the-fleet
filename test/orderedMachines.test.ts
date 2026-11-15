@@ -1,7 +1,7 @@
 // Worker selection uses controlled remote homes. These tests prove one-pass
 // admission behavior without pretending the unavailable second Mac is qualified.
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadProject, registerProject } from '../src/registry.ts';
@@ -9,12 +9,13 @@ import { compareWorkerLoad, defaultMachineNames, orderedMachines, runOnOrderedMa
 import { report } from './helpers/serviceFixture.ts';
 import { fetchPreflight } from '../src/run/remoteChecks.ts';
 import { Interrupts } from '../src/run/runJob.ts';
+import { evaluatePreflight, parsePreflight } from '../src/run/preflight.ts';
 import type { Machine } from '../src/schema/machines.ts';
 import { AdmissionTransport } from './helpers/admissionTransport.ts';
 import { testEnvironment, testMachine, writeFiles } from './helpers/fixtures.ts';
 
 
-function setup(command = 'echo tests 1', requires: Record<string, unknown> = {}) {
+function setup(command = 'echo tests 1', requires: Record<string, unknown> = {}, profile: Record<string, unknown> = {}) {
   const first = testEnvironment();
   const second = testEnvironment();
   const source = join(first.root, 'source');
@@ -22,7 +23,7 @@ function setup(command = 'echo tests 1', requires: Record<string, unknown> = {})
   const manifest = join(first.root, 'project.json');
   writeFileSync(manifest, JSON.stringify({ schemaVersion: 1, id: 'workers', sourceRoot: source, sync: { include: ['run.sh'] },
     profiles: { test: { description: 'workers', kind: 'test', argv: ['bash', 'run.sh'], requires,
-      timeoutMinutes: 0.1, success: { minTestCount: { pattern: 'tests (\\d+)', min: 1 } } } } }));
+      timeoutMinutes: 0.1, success: { minTestCount: { pattern: 'tests (\\d+)', min: 1 } }, ...profile } } }));
   registerProject(first.paths, manifest, undefined, false);
   const machines: [Machine, Machine] = [testMachine({ id: 'first', aliases: [] }), testMachine({ id: 'second', aliases: [] })];
   const transports: [AdmissionTransport, AdmissionTransport] = [new AdmissionTransport(first.remoteHome), new AdmissionTransport(second.remoteHome)];
@@ -33,8 +34,67 @@ function setup(command = 'echo tests 1', requires: Record<string, unknown> = {})
       assert.ok(transport);
       return transport;
     }, io: { stdout: first.stdout, stderr: first.stderr, status: (_line: string) => {} } };
-  return { request, machines, transports, cleanup: () => { first.cleanup(); second.cleanup(); } };
+  return { request, machines, transports, environments: [first, second] as const, cleanup: () => { first.cleanup(); second.cleanup(); } };
 }
+
+test('pending result counts parse separately from slots and use the existing ship cap', () => {
+  const machine = testMachine({ limits: { ...testMachine().limits, keepJobs: 2 } });
+  for (const [text, expected] of [['0', 0], ['2', 2], ['3', 3], ['-1', undefined], ['0.5', undefined], ['bad', undefined]] as const) {
+    const parsed = parsePreflight(`pending_artifacts=${text}\nlock=free\ndone=1\n`);
+    assert.equal(parsed.pendingArtifacts, expected);
+    const decision = evaluatePreflight(parsed, machine, undefined, { ignoreHeavyProcesses: false, nowEpoch: 0 });
+    assert.equal(decision.refusals.some(finding => finding.kind === 'busy'), expected !== undefined && expected >= 2);
+  }
+  assert.equal(parsePreflight('lock=free\ndone=1\n').pendingArtifacts, undefined, 'older observations remain compatible; worker still checks at admission');
+});
+
+for (const pinned of [false, true]) {
+  test(`a full pending-results ship ${pinned ? 'stays refused when pinned' : 'is skipped before unpinned admission'}`, { timeout: 30000 }, async () => {
+    const f = setup();
+    f.machines[0] = testMachine({ id: 'first', aliases: [], limits: { ...testMachine().limits, keepJobs: 1 } });
+    writeFiles(f.environments[0].remoteRoot, { 'jobs/retained/.fleet-job': '', 'jobs/retained/artifacts.pending': '', 'jobs/retained/artifacts.tar': 'only-result' });
+    try {
+      const request = { ...f.request, automatic: !pinned, machines: pinned ? [f.machines[0]] : f.machines };
+      if (pinned) await assert.rejects(() => runOnOrderedMachines(request), /No available remote workers/);
+      else assert.equal((await runOnOrderedMachines(request)).receipt.machine.id, 'second');
+      assert.deepEqual(f.transports.map(t => t.admissions), pinned ? [0, 0] : [0, 1]);
+      assert.equal(readFileSync(join(f.environments[0].remoteRoot, 'jobs/retained/artifacts.tar'), 'utf8'), 'only-result');
+      assert.equal(existsSync(join(f.environments[0].remoteRoot, 'jobs/retained/artifacts.pending')), true);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('a pending cap filled after preflight refuses before upload or hooks and advances only once', { timeout: 30000 }, async () => {
+  const f = setup('echo command >> "$HOME/hooks"; echo tests 1', {}, {
+    prepare: [['bash', '-c', 'echo prepare >> "$HOME/hooks"']],
+    finalizer: { argv: ['bash', '-c', 'echo finalizer >> "$HOME/hooks"'], timeoutSeconds: 3 },
+  });
+  f.machines[0] = testMachine({ id: 'first', aliases: [], limits: { ...testMachine().limits, maxConcurrentJobs: 2, keepJobs: 1 } });
+  // Choose this ship deterministically: live disk observations on the same
+  // test volume can differ while another fixture writes its own files.
+  f.transports[0].preflightValues['load_average'] = '0 0 0';
+  f.transports[1].preflightValues['load_average'] = '10 10 10';
+  const transport = f.transports[0];
+  const start = transport.start.bind(transport);
+  transport.start = command => {
+    if (command.includes('fleet-runner-supervisor')) writeFiles(f.environments[0].remoteRoot, {
+      'jobs/retained/.fleet-job': '', 'jobs/retained/artifacts.pending': '', 'jobs/retained/artifacts.tar': 'only-result',
+    });
+    return start(command);
+  };
+  try {
+    const run = await runOnOrderedMachines({ ...f.request, automatic: true });
+    assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.equal(run.receipt.machine.id, 'second');
+    assert.deepEqual(f.transports.map(t => t.admissions), [1, 1]);
+    assert.equal(existsSync(join(f.environments[0].remoteHome, 'hooks')), false);
+    assert.equal(readFileSync(join(f.environments[1].remoteHome, 'hooks'), 'utf8'), 'prepare\ncommand\nfinalizer\n');
+    assert.deepEqual(readdirSync(join(f.environments[0].remoteRoot, 'jobs')), ['retained']);
+    assert.deepEqual(readdirSync(join(f.environments[0].remoteRoot, 'locks/shared')), []);
+    assert.equal(transport.commands.length, 2, 'only preflight and the refused supervisor; no upload connection');
+    assert.equal(readFileSync(join(f.environments[0].remoteRoot, 'jobs/retained/artifacts.tar'), 'utf8'), 'only-result');
+  } finally { f.cleanup(); }
+});
 
 test('automatic ranking uses pressure, load per CPU, reservations and memory before preference', () => {
   const machine = testMachine();
@@ -104,6 +164,20 @@ for (const kind of ['uncertain', 'failed-test'] as const) {
     } finally { fixture.cleanup(); }
   });
 }
+
+test('a transport error after actual command execution never dispatches another ship', { timeout: 30000 }, async () => {
+  const f = setup('echo command >> "$HOME/executed"; echo tests 1');
+  f.transports[0].loseResult = true;
+  try {
+    const run = await runOnOrderedMachines(f.request);
+    assert.equal(run.admission, 'admitted');
+    assert.equal(run.receipt.outcome, 'error');
+    assert.equal(run.receipt.remote.lockReleased, false, 'no release confirmation crossed the failed transport');
+    assert.deepEqual(f.transports.map(t => t.admissions), [1, 0]);
+    assert.equal(readFileSync(join(f.environments[0].remoteHome, 'executed'), 'utf8'), 'command\n');
+    assert.equal(existsSync(join(f.environments[1].remoteHome, 'executed')), false);
+  } finally { f.cleanup(); }
+});
 
 test('machine env requirements skip incompatible worker and use selected env', { timeout: 30000 }, async () => {
   const fixture = setup('test "$DOCKER_CONTEXT" = isolated-second; echo tests 1', { machineEnv: ['DOCKER_CONTEXT'] });
