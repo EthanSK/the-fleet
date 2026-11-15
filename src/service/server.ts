@@ -245,6 +245,9 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       operation.outcome = operationOutcome(exitCode, operation.latestRun);
     }).catch((error: unknown) => {
       output.write(`${error instanceof Error ? error.message : 'Operation failed'}\n`);
+      // Ordered admission keeps one diagnostic per worker in FleetError.details.
+      // Preserve those in the same saved output clients poll after completion.
+      if (error instanceof FleetError) for (const detail of error.details) output.write(`${detail}\n`);
       operation.exitCode = error instanceof FleetError ? error.exitCode : 1;
       // Exit 1 is kept for compatibility, but an unexpected exception is a
       // Fleet error, not a failed job.

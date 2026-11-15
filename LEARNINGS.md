@@ -89,3 +89,9 @@ Release workflows invoke the signing host's versioned Sparkle copy at `~/.local/
 ## 2026-11-06 — Independent ordinary and E2E ceilings
 
 A whole-ship external reservation can report zero free capacity while consuming only one ordinary slot. Raising slot limits cannot bypass that deliberate exclusive claim. Classify browser/E2E work once from explicit metadata or known command/profile tokens (including extra CLI arguments), and carry that decision through coordinator reservations, preflight and remote kernel admission. E2E work takes both an ordinary slot and a separate E2E slot; old unknown managed records count conservatively for the E2E ceiling. Keep expiry as uncertain ownership, not automatic proof of cleanup.
+
+## 2026-11-15 — Failed artifact returns own their writers and partial copies
+
+- Transport exit does not close a file writer. An interrupted binary payload must destroy its writer, and both complete and interrupted returns must await the writer's `close` event before extraction or removal. A complete payload followed immediately by SSH exit still needs its queued writes drained. Exercise both boundaries with real file descriptors.
+- Each recovery needs an exclusively created directory, including concurrent attempts in the same millisecond. Remove that directory only before its verified local receipt exists, after the session and writer have closed. Save the receipt before ACK; if ACK or its confirmation is lost, preserve the verified local recovery because the worker may already have deleted its original.
+- Ordered admission stores individual worker refusals in `FleetError.details`. The operation error boundary must append those details to its retained output, rather than keeping only the final no-worker message. Preserve selection, ownership and no-replay rules while improving diagnostics.
