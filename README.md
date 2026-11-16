@@ -168,6 +168,17 @@ A manifest's explicit `defaultMachine` preserves a project-specific ship rule.
 Use `--machine worker` to pin a saved run or one-time submit to one ship.
 Use `--machines first,second` for an ordered list of candidates. Submit rejects
 unknown, repeated or conflicting ship options instead of ignoring them.
+For wrappers that construct a private one-time request internally, set
+`THE_FLEET_MACHINE=worker` on that wrapper's invocation. Its `submit` child uses
+the same binding worker selector without changing the request JSON, registrations
+or worker settings. Explicit `--machine` or `--machines` flags take precedence.
+This environment control applies to normal and dry-run `submit` calls only;
+without it, automatic selection is unchanged. For example:
+
+```sh
+THE_FLEET_MACHINE=first the-fleet submit request.json
+```
+
 No automatic local fallback runs tests on your laptop.
 Physical hardware, real microphone/camera and live desktop tests still run on
 the computer that owns those resources.

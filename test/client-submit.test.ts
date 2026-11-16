@@ -33,16 +33,18 @@ async function fixture() {
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(join(root, 'service.sock'), resolve); });
   return {
     calls,
-    run: (args: readonly string[]) => new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    run: (args: readonly string[], environment: NodeJS.ProcessEnv = {}, input: Record<string, unknown> = {
+      source: '.', files: ['package.json'], command: ['node', '--version'], kind: 'check', timeoutMinutes: 1,
+    }) => new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
       const child = spawn(process.execPath, [cli, 'submit', '-', ...args], {
-        env: { ...process.env, THE_FLEET_HOME: root }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000,
+        env: { ...process.env, THE_FLEET_HOME: root, THE_FLEET_MACHINE: undefined, ...environment }, stdio: ['pipe', 'pipe', 'pipe'], timeout: 10_000,
       });
       let stderr = '';
       child.stdout.resume();
       child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
       child.once('error', reject);
       child.once('close', (code) => resolve({ code, stderr }));
-      child.stdin.end(JSON.stringify({ source: '.', files: ['package.json'], command: ['node', '--version'], kind: 'check', timeoutMinutes: 1 }));
+      child.stdin.end(JSON.stringify(input));
     }),
     close: async () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -88,6 +90,66 @@ test('submit dry-run sends its singular worker only to the planning route', asyn
     assert.equal((await f.run(['--dry-run', '--machine', 'm1max'])).code, 0);
     assert.equal(f.calls.find((call) => call.path === '/v1/submit/plan')?.body['machine'], 'm1max');
     assert.equal(f.calls.some((call) => call.path === '/v1/submit'), false);
+  } finally { await f.close(); }
+});
+
+test('submit environment pins one invocation without changing its private request or later defaults', async () => {
+  const f = await fixture();
+  const input = {
+    source: '/fixture/source', profile: 'check', manifest: {
+      schemaVersion: 1, id: 'fixture', sync: { include: ['package.json', '.fixture-history/**'] },
+      profiles: { check: { kind: 'check', argv: ['node', 'check.js'], timeoutMinutes: 1, env: { FIXTURE_CREDENTIAL: 'synthetic-test-value' } } },
+    },
+  };
+  try {
+    assert.equal((await f.run([], { THE_FLEET_MACHINE: 'm1max' }, input)).code, 0);
+    const body = f.calls.find((call) => call.path === '/v1/submit')?.body;
+    assert.deepEqual(body?.['machines'], ['m1max']);
+    assert.deepEqual(body?.['request'], input);
+    f.calls.length = 0;
+    assert.equal((await f.run([])).code, 0);
+    const defaultSubmission = f.calls.find((call) => call.path === '/v1/submit');
+    assert.ok(defaultSubmission);
+    assert.equal(Object.hasOwn(defaultSubmission.body, 'machines'), false);
+  } finally { await f.close(); }
+});
+
+test('explicit submit flags override the invocation environment', async () => {
+  const f = await fixture();
+  try {
+    for (const [args, expected] of [
+      [['--machine', 'mini'], ['mini']],
+      [['--machines', 'mini,m1max'], ['mini', 'm1max']],
+    ] as const) {
+      f.calls.length = 0;
+      assert.equal((await f.run(args, { THE_FLEET_MACHINE: 'invalid,environment' })).code, 0);
+      assert.deepEqual(f.calls.find((call) => call.path === '/v1/submit')?.body['machines'], expected);
+    }
+  } finally { await f.close(); }
+});
+
+test('submit dry-run uses the invocation environment without starting an operation', async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.run(['--dry-run'], { THE_FLEET_MACHINE: 'm1max' })).code, 0);
+    assert.equal(f.calls.find((call) => call.path === '/v1/submit/plan')?.body['machine'], 'm1max');
+    assert.equal(f.calls.some((call) => call.path === '/v1/submit'), false);
+  } finally { await f.close(); }
+});
+
+test('invalid invocation pins and malformed explicit options fail before service contact while help stays inert', async () => {
+  const f = await fixture();
+  try {
+    for (const value of ['', 'mini,m1max']) {
+      assert.equal((await f.run([], { THE_FLEET_MACHINE: value })).code, 2);
+      assert.equal(f.calls.length, 0);
+    }
+    for (const args of [['--machine'], ['--machines'], ['--machin', 'mini']]) {
+      assert.equal((await f.run(args, { THE_FLEET_MACHINE: 'm1max' })).code, 2);
+      assert.equal(f.calls.length, 0);
+    }
+    assert.equal((await f.run(['--help'], { THE_FLEET_MACHINE: '' })).code, 0);
+    assert.equal(f.calls.length, 0);
   } finally { await f.close(); }
 });
 

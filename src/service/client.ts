@@ -98,8 +98,10 @@ function submitArguments(argv: readonly string[]): { requestFile: string; dryRun
   const args = parseArgs(argv, { flags: ['dry-run'], values: ['machine', 'machines', 'owner'] });
   const [requestFile = ''] = expectPositionals(args, ['request'], 'the-fleet submit <request.json | -> [--machine <name> | --machines <name,...>]');
   if (args.passthrough.length) throw usageError('Put job arguments in the request JSON.');
-  const machine = single(args, 'machine');
   const workerList = single(args, 'machines');
+  // Wrappers can keep their private stdin request intact and select one ship
+  // for this invocation. Explicit CLI selection still owns the decision.
+  const machine = single(args, 'machine') ?? (workerList === undefined ? process.env['THE_FLEET_MACHINE'] : undefined);
   const owner = single(args, 'owner');
   if (machine !== undefined && workerList !== undefined) throw usageError('Choose one worker selector: --machine or --machines.');
   if (machine !== undefined && (!machine || machine.includes(','))) throw usageError('--machine needs one worker. Use --machines for a list.');
