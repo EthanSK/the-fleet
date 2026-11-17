@@ -359,7 +359,15 @@ export class Coordinator {
     return save();
   }
 
-  async reserve(owner: string, label: string, machineNames: readonly string[] | undefined, ttlSeconds = 180, claim: CapacityClaim = { mode: 'exclusive', resources: [] }, onDiskSpaceProblem?: DiskSpaceProblemHandler): Promise<unknown> {
+  async reserve(
+    owner: string,
+    label: string,
+    machineNames: readonly string[] | undefined,
+    ttlSeconds = 180,
+    claim: CapacityClaim = { mode: 'exclusive', resources: [] },
+    onDiskSpaceProblem?: DiskSpaceProblemHandler,
+    reservationStillRequested: () => boolean = () => true,
+  ): Promise<unknown> {
     if (!owner.trim() || owner.length > 200 || !label.trim() || label.length > 300) throw new FleetError('usage', 'Supply a short owner and work label.');
     if (!Number.isInteger(ttlSeconds) || ttlSeconds < 15 || ttlSeconds > 3600) throw new FleetError('usage', 'Reservation duration must be 15–3600 seconds.');
     const local = await this.dependencies.localFingerprint();
@@ -419,6 +427,8 @@ export class Coordinator {
         // is handed out until a fresh idle check and no neighbouring lease.
         if (held.some((lease) => lease.claim?.mode !== 'shared')) continue;
       } else if (!this.accepts(report.fingerprint, claim, machine, report) || (claim.mode === 'exclusive' && !this.remoteIdle(report))) continue;
+      // A client that disconnected during preflight cannot receive the token needed to release the claim.
+      if (!reservationStillRequested()) throw new FleetError('cancelled', 'Cancelled before admission.');
       const token = randomBytes(24).toString('hex');
       const reservation: Reservation = {
         id: randomBytes(12).toString('hex'), machineId: machine.id, fingerprint: report.fingerprint,

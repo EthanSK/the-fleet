@@ -316,6 +316,8 @@ SSH. For a shared external release while neighbours remain busy, explicitly
 attest your own work stopped with `release --work-stopped`; the token is still
 required. Expiry/restart retains the claim's capacity and conflicts until
 verified release; neither proves an arbitrary SSH command ended.
+If the client disconnects while worker checks are still running, the abandoned
+request leaves the ship available for another reservation.
 
 For maintenance, `reserve --drain` (API claim mode `drain`) stops new admission
 without cancelling existing jobs. It returns `ready:false` and no connection.

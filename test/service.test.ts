@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
 import { join } from 'node:path';
 import { Coordinator, type CoordinatorDependencies } from '../src/service/coordinator.ts';
 import { callApi, ensureService } from '../src/service/client.ts';
@@ -55,6 +56,59 @@ test('concurrent apps and aliases cannot both reserve one physical machine', asy
     const state = JSON.stringify(await f.coordinator.state());
     assert.match(state, /app-one|app-two/); assert.match(state, /loadAverage/); assert.doesNotMatch(state, /tokenHash/);
   } finally { f.cleanup(); }
+});
+
+test('a client that disconnects during worker inspection leaves no reservation', { timeout: 5000 }, async () => {
+  function signal() {
+    let resolve = () => {};
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+  const f = fixture();
+  const inspectionStarted = signal();
+  const finishInspection = signal();
+  const responseClosed = signal();
+  const admissionFinished = signal();
+  const coordinator = new Coordinator(f.paths, {
+    ...f.dependencies,
+    inspect: async (machine) => {
+      inspectionStarted.resolve();
+      await finishInspection.promise;
+      return f.dependencies.inspect(machine);
+    },
+  });
+  const reserve = coordinator.reserve.bind(coordinator);
+  coordinator.reserve = async (...args) => {
+    try {
+      return await reserve(...args);
+    } finally {
+      admissionFinished.resolve();
+    }
+  };
+
+  const api = startApi(f.paths, coordinator);
+  await new Promise<void>((done) => api.server.listen(serviceSocket(f.paths), done));
+  api.server.once('request', (_request, response) => response.once('close', responseClosed.resolve));
+  const client = request({ socketPath: serviceSocket(f.paths), method: 'POST', path: '/v1/reservations' });
+  client.on('error', () => {});
+  client.end(JSON.stringify({ owner: 'abandoned-client', label: 'desktop tests', machines: ['mini'] }));
+  try {
+    await inspectionStarted.promise;
+    client.destroy();
+    await responseClosed.promise;
+    finishInspection.resolve();
+    await admissionFinished.promise;
+
+    assert.deepEqual((await callApi(f.paths, 'GET', '/v1/state'))['reservations'], []);
+    const next = await callApi(f.paths, 'POST', '/v1/reservations', { owner: 'next-client', label: 'desktop tests', machines: ['mini'] });
+    const lease = next as { reservation: { id: string }; token: string };
+    await coordinator.release(lease.reservation.id, lease.token);
+  } finally {
+    client.destroy();
+    finishInspection.resolve();
+    await api.shutdown();
+    f.cleanup();
+  }
 });
 
 test('expired and restarted external reservations keep ownership until verified release', async () => {

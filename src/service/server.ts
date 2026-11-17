@@ -312,7 +312,16 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
     if (method === 'POST' && path === '/v1/reservations') {
       if (stopping) throw new FleetError('machineBusy', 'The Fleet is stopping.');
       const input = await body(request);
-      return json(response, 200, await coordinator.reserve(text(input['owner'], 'owner', 200), text(input['label'], 'label', 300), input['machines'] === undefined ? undefined : strings(input['machines'], 'machines'), input['ttlSeconds'] === undefined ? 180 : Number(input['ttlSeconds']), input['claim'] === undefined ? undefined : parseClaim(input['claim']), diskNotifier(randomBytes(12).toString('hex'))));
+      const reservation = await coordinator.reserve(
+        text(input['owner'], 'owner', 200),
+        text(input['label'], 'label', 300),
+        input['machines'] === undefined ? undefined : strings(input['machines'], 'machines'),
+        input['ttlSeconds'] === undefined ? 180 : Number(input['ttlSeconds']),
+        input['claim'] === undefined ? undefined : parseClaim(input['claim']),
+        diskNotifier(randomBytes(12).toString('hex')),
+        () => !stopping && !response.destroyed && !request.socket.destroyed,
+      );
+      return json(response, 200, reservation);
     }
     if (method === 'POST' && (path === '/v1/renew' || path === '/v1/release' || path === '/v1/activate')) {
       const input = await body(request), id = text(input['id'], 'id'), token = text(input['token'], 'token');
@@ -471,6 +480,7 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
 
   const server = createServer((request, response) => {
     route(request, response).catch((error: unknown) => {
+      if (response.destroyed) return;
       const { status, value } = failure(error);
       if (!response.headersSent) json(response, status, value);
       else response.end();
