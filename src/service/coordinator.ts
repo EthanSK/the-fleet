@@ -116,9 +116,11 @@ export class Coordinator {
   private maintenancePending = 0;
   private readonly file: string;
   private readonly dependencies: CoordinatorDependencies;
+  private readonly mode: 'serve' | 'offline-recovery';
 
-  constructor(paths: StatePaths, dependencies = productionDependencies(paths)) {
+  constructor(paths: StatePaths, dependencies = productionDependencies(paths), mode: 'serve' | 'offline-recovery' = 'serve') {
     this.dependencies = dependencies;
+    this.mode = mode;
     ensurePrivateDir(paths.home);
     this.file = join(paths.home, 'reservations.json');
     if (existsSync(this.file)) {
@@ -133,7 +135,7 @@ export class Coordinator {
           throw new Error('Invalid reservation; preserve the store for recovery.');
         }
         // A restarted coordinator cannot infer that the former client's work ended.
-        this.reservations.set(item.id, { ...item, ...(item.claim === undefined ? {} : { claim: parseClaim(item.claim) }), state: 'unverified' } as Reservation);
+        this.reservations.set(item.id, { ...item, ...(item.claim === undefined ? {} : { claim: parseClaim(item.claim) }), state: mode === 'serve' ? 'unverified' : item.state } as Reservation);
       }
     }
   }
@@ -515,6 +517,8 @@ export class Coordinator {
     const machine = this.dependencies.machines().find((candidate) => candidate.id === lease.machineId);
     if (!machine) throw new FleetError('machineBusy', 'Worker configuration changed.');
     const { report } = await this.inspect(machine, true);
+    this.authorized(id, token);
+    if (lease.claim?.mode !== 'drain' || this.releasing.has(id)) throw new FleetError('machineBusy', 'Reservation changed while checking the worker.');
     if (!this.destinationIsCurrent(machine) || !report || report.fingerprint !== lease.fingerprint || !this.remoteIdle(report)
       || this.claims(lease.fingerprint).some((other) => other.id !== id)) return { ready: false, reservation: publicReservation(lease) };
     lease.claim = { mode: 'exclusive', resources: lease.claim.resources };
@@ -573,6 +577,45 @@ export class Coordinator {
     } finally {
       this.releasing.delete(id);
     }
+  }
+
+  /** Recovers one expired external claim after the operator verifies its work stopped. */
+  async recoverExpiredExternal({ id, owner, machineId, fingerprint }: Pick<Reservation, 'id' | 'owner' | 'machineId' | 'fingerprint'>): Promise<PublicReservation> {
+    const lease = this.reservations.get(id);
+    if (!lease || lease.kind !== 'external' || lease.owner !== owner || lease.machineId !== machineId || lease.fingerprint !== fingerprint) {
+      throw new FleetError('usage', 'No external reservation matches that ID, owner and ship.');
+    }
+    const { expiresAt, claim } = lease;
+    if (expiresAt === null || Date.parse(expiresAt) > this.dependencies.now()) {
+      throw new FleetError('machineBusy', 'The reservation has not expired.');
+    }
+    const machine = this.dependencies.machines().find((candidate) => candidate.id === machineId);
+    if (!machine) throw new FleetError('machineBusy', 'Worker configuration changed.');
+    const { report } = await this.inspect(machine, true);
+    // An abandoned managed lock can protect an oversized report after the process
+    // is gone. It must not keep an unrelated expired desktop claim alive too.
+    const processFree = report?.complete && report.admissionFree === true && report.lock.state === 'free'
+      && !report.heavy.length && !report.managedPgids?.length
+      && (report.sharedLocks ?? []).every(lock => lock.state === 'stale' && lock.jobId !== '-');
+    if (!report || !this.destinationIsCurrent(machine) || report.fingerprint !== fingerprint
+      || !(this.mode === 'serve' ? processFree : this.remoteIdle(report))) {
+      throw new FleetError('machineBusy', 'The ship is busy or its identity could not be verified.');
+    }
+    if (this.reservations.get(id) !== lease || lease.expiresAt !== expiresAt || lease.claim !== claim) {
+      throw new FleetError('machineBusy', 'The reservation changed while the ship was being checked.');
+    }
+    if (this.releasing.has(id) || this.forwardings.has(id)) {
+      throw new FleetError('machineBusy', 'The reservation still owns a forwarding session.');
+    }
+    // Recheck after the probe and persist in the same turn as the decision.
+    this.reservations.delete(id);
+    try {
+      this.persist();
+    } catch (error) {
+      this.reservations.set(id, lease);
+      throw error;
+    }
+    return publicReservation({ ...lease, state: 'expired' });
   }
 
   async runOne(owner: string, operation: string, request: RunRequest): Promise<RunResult | null> {

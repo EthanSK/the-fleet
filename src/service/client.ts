@@ -139,6 +139,32 @@ export async function runClient(argv: readonly string[]): Promise<number> {
     return result.status ?? 2;
   }
   let paths = resolveStatePaths();
+  if (argv[0] === 'recover-external-reservation' || (argv[0] === 'service' && argv[1] === 'recover-external-reservation')) {
+    const underLock = argv[0] === 'service';
+    const options = argv.slice(underLock ? 2 : 1);
+    const args = parseArgs(options, { flags: ['work-stopped', 'wait-for-stop'], values: ['id', 'owner', 'machine', 'fingerprint'] });
+    const id = single(args, 'id'), owner = single(args, 'owner'), machineId = single(args, 'machine'), fingerprint = single(args, 'fingerprint');
+    if (args.positionals.length || args.passthrough.length || !args.flags.has('work-stopped') || !id || !owner || !machineId || !fingerprint) {
+      throw usageError('Use recover-external-reservation with --id, --owner, --machine, --fingerprint and --work-stopped.');
+    }
+    if (!underLock && !args.flags.has('wait-for-stop') && await health(paths)) {
+      print(await callApi(paths, 'POST', '/v1/reservations/recover', { id, owner, machineId, fingerprint, workStopped: true }));
+      return 0;
+    }
+    if (!underLock) {
+      const child = spawnSync('python3', [lockProgram, '--maintenance', ...(args.flags.has('wait-for-stop') ? ['--wait-for-stop'] : []),
+        process.execPath, bin, 'service', 'recover-external-reservation', ...options], {
+        stdio: 'inherit', env: { ...process.env, THE_FLEET_HOME: paths.home },
+      });
+      if (child.error) throw child.error;
+      return child.status ?? 2;
+    }
+    if (process.env['THE_FLEET_SERVICE_LOCK'] !== 'maintenance' || await health(paths)) throw usageError('Run recovery through the local Fleet command with the service stopped.');
+    const { Coordinator } = await import('./coordinator.ts');
+    const coordinator = new Coordinator(paths, undefined, 'offline-recovery');
+    print({ released: await coordinator.recoverExpiredExternal({ id, owner, machineId, fingerprint }) });
+    return 0;
+  }
   if (argv[0] === '--version') { print({ application: 'The Fleet', version: JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version }); return 0; }
   const submitted = argv[0] === 'submit' ? submitArguments(argv.slice(1)) : undefined;
   const projectResolution = argv[0] === 'project' && argv[1] === 'resolve'

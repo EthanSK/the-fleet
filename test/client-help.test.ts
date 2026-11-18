@@ -70,7 +70,7 @@ test('subcommand help bypasses parsing, payload reads and service mutations, inc
     for (const args of [
       [], ['help'], ['--help'], ['-h'], ['help', 'reserve'], ['submit', '/missing-request.json', '--help'],
       ['maintain', '-h'], ['renew', '--help'], ['release', '-h'], ['activate', '--help'],
-      ['recover-reservations', '--help'], ['service', 'stop', '--help'],
+      ['recover-reservations', '--help'], ['recover-external-reservation', '--help'], ['service', 'stop', '--help'],
       ['rpc', 'POST', '/v1/reservations', '/missing-body.json', '--help'],
       ['machine', 'add', '--help'], ['unregister', '--help'], ['cancel', '-h'], ['lock', 'clear', '--help'],
     ]) {

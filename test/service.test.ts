@@ -5,6 +5,8 @@ import { test } from 'node:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { Coordinator, type CoordinatorDependencies } from '../src/service/coordinator.ts';
 import { callApi, ensureService } from '../src/service/client.ts';
 import { inlineProject, startApi, serviceSocket } from '../src/service/server.ts';
@@ -14,13 +16,14 @@ import type { PreflightReport } from '../src/run/preflight.ts';
 import { LocalShellTransport } from './helpers/localShellTransport.ts';
 import { CapturedStream } from './helpers/fixtures.ts';
 
-function fixture() {
+function fixture(maxConcurrentJobs = 1) {
   const root = mkdtempSync('/tmp/the-fleet-test-');
   const paths = resolveStatePaths({ THE_FLEET_HOME: root });
-  const machine = testMachine();
+  const baseMachine = testMachine();
+  const machine = { ...baseMachine, limits: { ...baseMachine.limits, maxConcurrentJobs } };
   let now = Date.now();
   let report: PreflightReport = { complete: true, fingerprint: 'remote', rootExists: true,
-    guiSession: true, bsdtar: true, missingBaseTools: [], tools: new Map(), heavy: [], lock: { state: 'free' },
+    guiSession: true, bsdtar: true, missingBaseTools: [], tools: new Map(), heavy: [], lock: { state: 'free' }, admissionFree: true,
     cpuCount: 8, loadAverage: [1, 2, 3] };
   const dependencies: CoordinatorDependencies = {
     machines: () => [machine, { ...machine, id: 'alias' }],
@@ -32,6 +35,9 @@ function fixture() {
   return { paths, dependencies, coordinator: new Coordinator(paths, dependencies),
     pending: () => { report = { ...report, pendingArtifacts: machine.limits.keepJobs }; },
     expire: () => { now += 400_000; }, busy: () => { report = { ...report, lock: { state: 'busy', jobId: 'another-job', label: 'busy', orphaned: false } }; },
+    idle: () => { report = { ...report, lock: { state: 'free' } }; },
+    stale: () => { report = { ...report, sharedLocks: [{ state: 'stale', jobId: 'old-report', label: 'Preserved output' }] }; },
+    setRemoteIdentity: (fingerprint: string) => { report = { ...report, fingerprint }; },
     cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -134,6 +140,143 @@ test('busy remote refuses release and route errors never strand reservations', a
     const result = await f.coordinator.reserve('owner', 'tests', ['mini']) as { reservation: { id: string }; token: string };
     f.busy(); await assert.rejects(f.coordinator.release(result.reservation.id, result.token), /busy/);
   } finally { f.cleanup(); }
+});
+
+test('offline recovery checks exact expired ownership and preserves other desktop capacity and credentials', async () => {
+  const f = fixture(3);
+  try {
+    const claim = { mode: 'shared', resources: ['desktop'], workload: 'e2e' } as const;
+    const match = { owner: 'original-owner', machineId: 'mini', fingerprint: 'remote' };
+    const lease = await f.coordinator.reserve(match.owner, 'GUI tests', ['mini'], 180, claim) as { reservation: { id: string }; token: string };
+    const neighbor = await f.coordinator.reserve('neighbor', 'ordinary tests', ['mini'], 180, { mode: 'shared', resources: [] }) as { reservation: { id: string }; token: string };
+    const target = { ...match, id: lease.reservation.id };
+    const readStore = () => readFileSync(join(f.paths.home, 'reservations.json'), 'utf8');
+    const originalStore = readStore();
+    const offline = new Coordinator(f.paths, f.dependencies, 'offline-recovery');
+    await assert.rejects(offline.recoverExpiredExternal(target), /has not expired/);
+    f.expire();
+    await assert.rejects(f.coordinator.reserve('second', 'GUI tests', ['mini'], 180, claim), /No available/);
+    await assert.rejects(offline.recoverExpiredExternal({ ...target, owner: 'different-owner' }), /No external reservation/);
+    f.setRemoteIdentity('different-ship');
+    await assert.rejects(offline.recoverExpiredExternal(target), /identity/);
+    f.setRemoteIdentity('remote');
+    f.busy();
+    await assert.rejects(offline.recoverExpiredExternal(target), /busy/);
+    assert.equal(readStore(), originalStore);
+    f.idle();
+    const released = await offline.recoverExpiredExternal(target);
+    assert.equal(released.id, lease.reservation.id);
+    assert.equal(released.state, 'expired');
+    assert.equal('tokenHash' in released, false);
+    const originalRecords = JSON.parse(originalStore) as { id: string }[];
+    assert.deepEqual(JSON.parse(readStore()), originalRecords.filter(record => record.id === neighbor.reservation.id));
+    const restarted = new Coordinator(f.paths, f.dependencies);
+    const next = await restarted.reserve('second', 'GUI tests', ['mini'], 180, claim) as { reservation: { id: string }; token: string };
+    await restarted.release(neighbor.reservation.id, neighbor.token, true);
+    await restarted.release(next.reservation.id, next.token, true);
+  } finally { f.cleanup(); }
+});
+
+test('recovery CLI uses the running coordinator or explicitly waits for graceful stop', { timeout: 20_000 }, async () => {
+  const f = fixture();
+  await ensureService(f.paths);
+  try {
+    const cli = fileURLToPath(new URL('../bin/the-fleet.js', import.meta.url));
+    const recover = (flags: string[], waiting = () => {}) => new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, [cli, 'recover-external-reservation', '--id', 'claim', '--owner', 'owner', '--machine', 'mini',
+        '--fingerprint', 'remote', '--work-stopped', ...flags], { env: { ...process.env, THE_FLEET_HOME: f.paths.home }, stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (chunk: Buffer) => {
+        const alreadyWaiting = stderr.includes('Waiting for the coordinator lock.');
+        stderr += chunk.toString();
+        if (!alreadyWaiting && stderr.includes('Waiting for the coordinator lock.')) waiting();
+      });
+      child.once('error', reject);
+      child.once('close', (code) => resolve({ code, stderr }));
+    });
+    const result = await recover([]);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /No external reservation matches/);
+    assert.equal((await callApi(f.paths, 'GET', '/v1/health'))['application'], 'The Fleet');
+    let signalWaiting = () => {};
+    const ready = new Promise<void>((resolve) => { signalWaiting = resolve; });
+    const queued = recover(['--wait-for-stop'], signalWaiting);
+    await Promise.race([ready, queued.then(() => assert.fail('Recovery returned before waiting for the lock'))]);
+    assert.equal((await callApi(f.paths, 'POST', '/v1/stop', {}))['stopping'], true);
+    const completed = await queued;
+    assert.equal(completed.code, 2);
+    assert.match(completed.stderr, /No external reservation matches/);
+  } finally { await callApi(f.paths, 'POST', '/v1/stop', {}).catch(() => {}); f.cleanup(); }
+});
+
+test('live recovery frees exactly the expired desktop and preserves a stale report and neighboring claim', async () => {
+  const f = fixture(3);
+  const api = startApi(f.paths, f.coordinator);
+  await new Promise<void>(done => api.server.listen(serviceSocket(f.paths), done));
+  try {
+    const claim = { mode: 'shared', resources: ['desktop'], workload: 'e2e' };
+    const { reservation } = await callApi(f.paths, 'POST', '/v1/reservations', {
+      owner: 'original', label: 'desktop tests', machines: ['mini'], claim,
+    });
+    const { reservation: neighbor } = await callApi(f.paths, 'POST', '/v1/reservations', {
+      owner: 'other', label: 'ordinary work', machines: ['mini'], claim: { mode: 'shared', resources: [] },
+    });
+    const { id } = reservation as { id: string };
+    const target = { id, owner: 'original', machineId: 'mini', fingerprint: 'remote' };
+    const recover = (overrides: Record<string, unknown> = {}) =>
+      callApi(f.paths, 'POST', '/v1/reservations/recover', { ...target, workStopped: true, ...overrides });
+
+    await assert.rejects(recover({ workStopped: false }), /work has stopped/);
+    await assert.rejects(recover(), /has not expired/);
+    f.expire();
+    await assert.rejects(recover({ owner: 'other' }), /No external reservation matches/);
+    f.busy();
+    await assert.rejects(recover(), /ship is busy/);
+    f.idle();
+    f.stale();
+    const result = await recover();
+    assert.equal((result['released'] as { id: string }).id, id);
+    const { reservations, workers } = await f.coordinator.state(true) as {
+      reservations: { id: string }[];
+      workers: { health: { sharedLocks: { jobId: string }[] } }[];
+    };
+    assert.deepEqual(reservations.map(lease => lease.id), [(neighbor as { id: string }).id]);
+    assert.equal(workers[0]?.health.sharedLocks[0]?.jobId, 'old-report');
+    const next = await callApi(f.paths, 'POST', '/v1/reservations', {
+      owner: 'next', label: 'desktop tests', machines: ['mini'], claim,
+    });
+    await callApi(f.paths, 'POST', '/v1/release', {
+      id: (next['reservation'] as { id: string }).id, token: next['token'], workStopped: true,
+    });
+  } finally {
+    await api.shutdown();
+    f.cleanup();
+  }
+});
+
+test('recovery refuses a claim renewed while the ship check was running', async () => {
+  const f = fixture();
+  try {
+    const claim = await f.coordinator.reserve('owner', 'desktop tests', ['mini']) as { reservation: { id: string }; token: string };
+    f.expire();
+    let finishInspection!: () => void;
+    const inspectionGate = new Promise<void>(resolve => { finishInspection = resolve; });
+    const coordinator = new Coordinator(f.paths, {
+      ...f.dependencies,
+      inspect: async machine => {
+        await inspectionGate;
+        return f.dependencies.inspect(machine);
+      },
+    });
+    const id = claim.reservation.id;
+    const recovering = coordinator.recoverExpiredExternal({ id, owner: 'owner', machineId: 'mini', fingerprint: 'remote' });
+    coordinator.renew(id, claim.token);
+    finishInspection();
+    await assert.rejects(recovering, /reservation changed/);
+    assert.equal(coordinator.reservationById(id)?.state, 'active');
+  } finally {
+    f.cleanup();
+  }
 });
 
 test('one-time request validates a real profile without registering it', () => {

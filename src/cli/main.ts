@@ -30,6 +30,7 @@ Coordinator
   the-fleet forward --id <id> --token <token> --ports <local[:remote],...>
   the-fleet forward stop --id <id> --token <token>
   the-fleet recover-reservations
+  the-fleet recover-external-reservation --id <id> --owner <owner> --machine <name> --fingerprint <identity> --work-stopped [--wait-for-stop]
   the-fleet service status | install | stop
   the-fleet migrate-home [--dry-run]
   the-fleet rpc <METHOD> </v1/path> [body.json | -]

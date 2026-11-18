@@ -68,7 +68,8 @@ flowchart LR
   then stop your work and release. Expiry marks ownership uncertain; it does not
   claim that a process stopped. After a coordinator crash, `recover-reservations`
   clears only managed reservations with freshly verified idle ships. External
-  reservations still require their token and an explicit verified release.
+  reservations use their token for normal release, with exact operator recovery
+  for expired claims when the token was lost.
 - This is coordination for trusted local apps, not an executable-code sandbox.
   Your OS user can run arbitrary SSH and bypass it. Unreserved work is reported
   where observable but cannot be forced through this service.
@@ -319,6 +320,25 @@ verified release; neither proves an arbitrary SSH command ended.
 If the client disconnects while worker checks are still running, the abandoned
 request leaves the ship available for another reservation.
 
+If an external reservation's token is lost, a local operator can recover the
+exact expired claim through the running coordinator. Confirm that the owner's
+SSH and GUI work has stopped and its port forwards have closed. Use Fleet state
+to get the reservation ID, owner, ship ID and physical fingerprint:
+
+```sh
+the-fleet recover-external-reservation --id ID --owner OWNER --machine SHIP \
+  --fingerprint FINGERPRINT --work-stopped
+the-fleet state --fresh
+```
+
+Live recovery checks the same physical ship for active work and preserves
+every other reservation and job. It can release the expired claim while a
+separate, verified stale managed lock is retaining outputs. Normal release,
+forwarding and renewal still require the token. When the coordinator is
+already offline, recovery uses its exclusive local lock and requires a fully
+idle ship. `--wait-for-stop` explicitly queues for that offline lock for up
+to 15 seconds for older coordinators that lack the live route.
+
 For maintenance, `reserve --drain` (API claim mode `drain`) stops new admission
 without cancelling existing jobs. It returns `ready:false` and no connection.
 Call `activate --id ... --token ...` after jobs finish; a fresh idle check and
@@ -356,8 +376,9 @@ guard. Its supervisor, job group, upload and finalizer must be gone. A missing
 marker, changed job, symlink or unknown owner is retained. Existing finalizers and
 bounded output capture run before scratch deletion, preserving failed evidence
 and pending outputs. An uncertain cleanup keeps coordinator ownership for recovery.
-Interrupted managed reservations still use `recover-reservations`; external work
-still requires its token and explicit release. The latest maintenance result is
+Interrupted managed reservations still use `recover-reservations`. External
+work uses its token for normal release or exact recovery for an expired claim.
+The latest maintenance result is
 included in ship state with its observation time.
 
 ## Discovery and your own SSH
@@ -429,6 +450,7 @@ HTTP runs over `~/.the-fleet/service.sock` (mode 0600), not an open TCP port.
 | GET /v1/operations/ID?offset=N | Poll output/result; also keeps job alive |
 | POST /v1/operations/ID/cancel | Idempotent cancellation; optional `{forceDisconnect: true}` explicitly disconnects SSH |
 | POST /v1/reservations | `{owner, label, machines?, ttlSeconds?, claim?}` |
+| POST /v1/reservations/recover | `{id, owner, machineId, fingerprint, workStopped:true}`: recover one expired external claim |
 | POST /v1/activate | `{id, token}`: activate a drained ship after fresh idle proof |
 | POST /v1/renew or /v1/release | `{id, token, ttlSeconds?}` |
 | POST /v1/forwards | `{id, token, forwards: [{localPort, remotePort}]}`: hold loopback ssh forwards for an external reservation |

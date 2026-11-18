@@ -323,6 +323,17 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
       );
       return json(response, 200, reservation);
     }
+    if (method === 'POST' && path === '/v1/reservations/recover') {
+      assertAcceptingOperations();
+      const input = await body(request);
+      if (input['workStopped'] !== true) throw usageError('Confirm that the reservation’s work has stopped.');
+      assertAcceptingOperations();
+      const released = await coordinator.recoverExpiredExternal({
+        id: text(input['id'], 'id'), owner: text(input['owner'], 'owner', 200),
+        machineId: text(input['machineId'], 'machine ID'), fingerprint: text(input['fingerprint'], 'fingerprint'),
+      });
+      return json(response, 200, { released });
+    }
     if (method === 'POST' && (path === '/v1/renew' || path === '/v1/release' || path === '/v1/activate')) {
       const input = await body(request), id = text(input['id'], 'id'), token = text(input['token'], 'token');
       if (path === '/v1/renew') return json(response, 200, coordinator.renew(id, token, input['ttlSeconds'] === undefined ? 180 : Number(input['ttlSeconds'])));
