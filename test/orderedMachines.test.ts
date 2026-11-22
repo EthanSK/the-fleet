@@ -5,7 +5,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadProject, registerProject } from '../src/registry.ts';
-import { compareWorkerLoad, defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../src/run/orderedMachines.ts';
+import { compareWorkerMemory, defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../src/run/orderedMachines.ts';
 import { report } from './helpers/serviceFixture.ts';
 import { fetchPreflight } from '../src/run/remoteChecks.ts';
 import { Interrupts } from '../src/run/runJob.ts';
@@ -72,8 +72,8 @@ test('a pending cap filled after preflight refuses before upload or hooks and ad
   f.machines[0] = testMachine({ id: 'first', aliases: [], limits: { ...testMachine().limits, maxConcurrentJobs: 2, keepJobs: 1 } });
   // Choose this ship deterministically: live disk observations on the same
   // test volume can differ while another fixture writes its own files.
-  f.transports[0].preflightValues['load_average'] = '0 0 0';
-  f.transports[1].preflightValues['load_average'] = '10 10 10';
+  f.transports[0].preflightValues['mem_available_bytes'] = String(10 * 1024 ** 3);
+  f.transports[1].preflightValues['mem_available_bytes'] = String(8 * 1024 ** 3);
   const transport = f.transports[0];
   const start = transport.start.bind(transport);
   transport.start = command => {
@@ -96,15 +96,32 @@ test('a pending cap filled after preflight refuses before upload or hooks and ad
   } finally { f.cleanup(); }
 });
 
-test('automatic ranking uses pressure, load per CPU, reservations and memory before preference', () => {
+test('automatic ranking uses pressure, headroom and available RAM, with CPU only in diagnostics', () => {
+  const GiB = 1024 ** 3;
   const machine = testMachine();
-  const base = { machine, used: 0, report: report('normal', { memPressureLevel: 1, cpuCount: 10, loadAverage: [1], memAvailableBytes: 4 * 1024 ** 3 }) };
-  assert.ok(compareWorkerLoad(base, { ...base, report: { ...base.report, memPressureLevel: 2, loadAverage: [0] } }) < 0);
-  assert.ok(compareWorkerLoad(base, { ...base, report: { ...base.report, cpuCount: 2 } }) < 0);
-  assert.ok(compareWorkerLoad(base, { ...base, used: 1 }) < 0);
-  assert.ok(compareWorkerLoad(base, { ...base, report: { ...base.report, memAvailableBytes: 1024 ** 3 } }) < 0);
-  assert.equal(compareWorkerLoad(base, base), 0);
-  assert.ok(compareWorkerLoad(base, { ...base, report: report('unknown') }) < 0);
+  const base = { machine, report: report('normal', { os: 'Darwin', memPressureLevel: 1, cpuCount: 10, loadAverage: [80], memAvailableBytes: 4 * GiB, swapDiskFreeBytes: 12 * GiB }) };
+  assert.ok(compareWorkerMemory(base, { ...base, report: { ...base.report, memPressureLevel: 2, memAvailableBytes: 16 * GiB, loadAverage: [0] } }) < 0);
+  assert.equal(compareWorkerMemory(base, { ...base, report: { ...base.report, cpuCount: 2, loadAverage: [0] } }), 0);
+  assert.ok(compareWorkerMemory(base, { ...base, report: { ...base.report, memAvailableBytes: GiB, swapFreeBytes: 3 * GiB } }) < 0);
+  assert.ok(compareWorkerMemory(base, { ...base, report: { ...base.report, memAvailableBytes: GiB, swapFreeBytes: 4 * GiB } }) > 0);
+  assert.ok(compareWorkerMemory(base, { ...base, report: report('unknown') }) < 0);
+});
+
+test('preflight credits measured free swap while preserving pressure and disk limits', () => {
+  const GiB = 1024 ** 3;
+  const machine = testMachine({ limits: { ...testMachine().limits, minAvailableMemoryGiB: 1, minFreeDiskGiB: 8, memoryPressure: 'refuse-critical' } });
+  const base = parsePreflight([
+    'os=Darwin', 'lock=free', 'done=1', `mem_available_bytes=${GiB / 2}`, 'mem_pressure_level=2',
+    `disk_free_kb=${16 * GiB / 1024}`, `swap_free_bytes=${GiB}`, `swap_disk_free_bytes=${16 * GiB}`, 'swap_used_mb=2048',
+  ].join('\n'));
+  const refusals = (observation: typeof base) =>
+    evaluatePreflight(observation, machine, undefined, { ignoreHeavyProcesses: false, nowEpoch: 0 }).refusals.map(finding => finding.kind);
+  assert.deepEqual(refusals(base), []);
+  assert.deepEqual(refusals({ ...base, memPressureLevel: 4 }), ['pressure']);
+  assert.deepEqual(refusals({ ...base, diskFreeBytes: GiB }), ['disk']);
+  assert.deepEqual(refusals({ ...base, swapDiskFreeBytes: GiB }), ['memory']);
+  assert.deepEqual(refusals({ ...base, swapFreeBytes: 0 }), ['memory'], 'used swap alone gives no headroom');
+  assert.deepEqual(refusals({ ...base, os: 'Linux', swapDiskFreeBytes: GiB }), [], 'Linux SwapFree describes preallocated swap');
 });
 
 test('explicit worker order preserves names and rejects repeated physical aliases', () => {

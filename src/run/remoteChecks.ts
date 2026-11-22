@@ -8,8 +8,8 @@ import { firstLines, runCaptured, type Transport } from '../transport/transport.
 import { parseLockState, parsePreflight, type LockState, type PreflightReport } from './preflight.ts';
 import { parseArchiveDiskSpaceProblem, type DiskSpaceProblem } from './diskSpace.ts';
 
-export async function fetchPreflight(transport: Transport, machine: Machine, pathPrepend: readonly string[], tools: readonly string[]): Promise<PreflightReport> {
-  const result = await runCaptured(transport, preflightCommand(machine, pathPrepend, tools), { timeoutMs: 45_000 });
+export async function fetchPreflight(transport: Transport, machine: Machine, pathPrepend: readonly string[], tools: readonly string[], recoveryJobs: readonly string[] = []): Promise<PreflightReport> {
+  const result = await runCaptured(transport, preflightCommand(machine, pathPrepend, tools, recoveryJobs), { timeoutMs: 45_000 });
   const report = parsePreflight(result.stdout);
   if (!report.complete) {
     throw new FleetError('transport', `Machine check on ${machine.id} failed (exit ${result.exit.code ?? result.exit.signal ?? 'unknown'}).`, firstLines(result.stderr, 3));
@@ -81,7 +81,8 @@ export interface ControlResult {
 }
 
 export async function runControl(transport: Transport, machine: Machine, action: Exclude<ControlAction, 'status'>, expectedJobId?: string): Promise<ControlResult> {
-  const result = await runCaptured(transport, controlCommand(machine, action, expectedJobId), { timeoutMs: 120_000 });
+  // Explicit and automatic stale cleanup both run the same finalizer (up to five minutes).
+  const result = await runCaptured(transport, controlCommand(machine, action, expectedJobId), { timeoutMs: action === 'cancel' ? 120_000 : 360_000 });
   const line = result.stdout.split('\n').find((candidate) => candidate.startsWith('result='));
   if (result.exit.code !== 0 || line === undefined) throw new FleetError('transport', `Control call on ${machine.id} failed.`, firstLines(result.stderr, 3));
   const value = line.slice('result='.length);

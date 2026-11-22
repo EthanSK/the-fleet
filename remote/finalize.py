@@ -27,7 +27,7 @@ except BlockingIOError:
 for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
     signal.signal(sig, signal.SIG_IGN)
 seconds = int((job / 'meta/finalizer-seconds').read_text().strip())
-if not 1 <= seconds <= 60:
+if not 1 <= seconds <= 300:
     sys.exit(1)
 env = dict(os.environ, FLEET_RUNNER='1', FLEET_RUNNER_JOB_ID=job.name,
            FLEET_RUNNER_JOB_DIR=str(job), FLEET_RUNNER_SRC_DIR=str(job / 'src'))
@@ -41,12 +41,16 @@ def alive(pgid):
     rows = subprocess.run(['ps', '-axo', 'pgid=,stat='], capture_output=True, text=True).stdout.splitlines()
     return any(len(parts := row.split()) >= 2 and parts[0] == str(pgid) and not parts[1].startswith('Z') for row in rows)
 
-def stop(pgid):
+def stop(pgid: int) -> None:
     for sig, duration in ((signal.SIGTERM, 1), (signal.SIGKILL, 2)):
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:
             return
+        except PermissionError as error:
+            # Keep checking the group and record the finalizer outcome even
+            # when the worker cannot signal every process in the group.
+            print(f'Finalizer could not send {sig.name} to group {pgid}: {error}', file=sys.stderr, flush=True)
         end = time.monotonic() + duration
         while alive(pgid) and time.monotonic() < end:
             time.sleep(.1)

@@ -58,6 +58,17 @@ export interface CacheRequest {
   readonly maxGiB: number;
   /** Only opt in after checking the cache tools support concurrent writers. */
   readonly concurrent?: boolean;
+  readonly setup?: CachedSetup;
+}
+
+export interface CachedSetup {
+  readonly directory: string;
+  readonly inputs: readonly string[];
+  readonly runtime: readonly (readonly string[])[];
+  readonly steps: readonly (readonly string[])[];
+  readonly keyEnv: readonly string[];
+  /** When omitted, every declared profile and machine variable is keyed and inherited by setup. */
+  readonly declaredEnv?: readonly string[];
 }
 
 export interface ProfileRequirements {
@@ -257,11 +268,13 @@ function parseProfile(reader: Reader, name: string, value: unknown): Profile {
   let cache: CacheRequest | undefined;
   if (profile['cache'] !== undefined) {
     const cacheReader = reader.child('cache');
-    const cacheValue = cacheReader.object(profile['cache'], ['name', 'maxGiB', 'concurrent']);
+    const cacheValue = cacheReader.object(profile['cache'], ['name', 'maxGiB', 'concurrent', 'setup']);
+    const setup = cacheValue['setup'] === undefined ? undefined : parseCachedSetup(cacheReader.child('setup'), cacheValue['setup']);
     cache = {
       name: cacheReader.child('name').string(cacheValue['name'], { pattern: IDENTIFIER_PATTERN, patternHint: IDENTIFIER_HINT }),
       maxGiB: cacheReader.child('maxGiB').number(cacheValue['maxGiB'], { min: 0.1, max: 64 }),
       concurrent: cacheReader.child('concurrent').optionalBoolean(cacheValue['concurrent']) ?? false,
+      ...(setup === undefined ? {} : { setup }),
     };
   }
 
@@ -282,7 +295,7 @@ function parseProfile(reader: Reader, name: string, value: unknown): Profile {
   if (profile['finalizer'] !== undefined) {
     const child = reader.child('finalizer');
     const raw = child.object(profile['finalizer'], ['argv', 'timeoutSeconds']);
-    finalizer = { argv: parseArgv(child.child('argv'), raw['argv']), timeoutSeconds: child.child('timeoutSeconds').number(raw['timeoutSeconds'], { integer: true, min: 1, max: 60 }) };
+    finalizer = { argv: parseArgv(child.child('argv'), raw['argv']), timeoutSeconds: child.child('timeoutSeconds').number(raw['timeoutSeconds'], { integer: true, min: 1, max: 300 }) };
   }
 
   return {
@@ -310,6 +323,26 @@ function parseProfile(reader: Reader, name: string, value: unknown): Profile {
     ...(sourceTransfer === undefined ? {} : { sourceTransfer: sourceTransfer as 'tar' | 'rsync' }),
     ...(blocked === undefined ? {} : { blocked }),
   };
+}
+
+function parseCachedSetup(reader: Reader, value: unknown): CachedSetup {
+  const setup = reader.object(value, ['directory', 'inputs', 'runtime', 'steps', 'keyEnv', 'declaredEnv']);
+  const directory = reader.child('directory').string(setup['directory'], { pattern: /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, patternHint: 'must be one generated directory name' });
+  const inputs = reader.child('inputs').stringArray(setup['inputs'], { minLength: 1 }).map((input, index) => {
+    const check = checkRelativePath(input);
+    return check.ok ? check.normalized : reader.child('inputs').child(index).fail(check.reason);
+  });
+  const commands = (key: 'runtime' | 'steps') => {
+    const child = reader.child(key);
+    const entries = child.array(setup[key]);
+    if (entries.length === 0) child.fail('must include at least one command');
+    return entries.map((entry, index) => parseArgv(child.child(index), entry));
+  };
+  const environmentNames = { pattern: ENV_NAME_PATTERN, patternHint: 'must be an environment variable name' };
+  const keyEnv = reader.child('keyEnv').optionalStringArray(setup['keyEnv'], environmentNames) ?? [];
+  const declaredEnv = reader.child('declaredEnv').optionalStringArray(setup['declaredEnv'], environmentNames);
+  return { directory, inputs, runtime: commands('runtime'), steps: commands('steps'), keyEnv,
+    ...(declaredEnv === undefined ? {} : { declaredEnv }) };
 }
 
 function parseRequirements(reader: Reader, value: unknown): ProfileRequirements {

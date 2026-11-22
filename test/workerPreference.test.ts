@@ -48,9 +48,10 @@ async function fixture(outcome: Receipt['outcome'] = 'passed', execute?: (reques
 }
 
 for (const route of ['submit', 'command', 'project'] as const) {
-  test(`automatic ${route} chooses the quieter worker instead of filling the preferred one`, async () => {
+  test(`automatic ${route} chooses the CPU-busier worker with better memory headroom`, async () => {
     const { f, manifest, preflights } = await fixture();
-    preflights.set('second', { load_average: '80 80 80' });
+    preflights.set('first', { load_average: '80 80 80', mem_available_bytes: String(6 * 1024 ** 3),
+      swap_free_bytes: String(4 * 1024 ** 3), swap_disk_free_bytes: String(64 * 1024 ** 3) });
     try {
       const started = route === 'submit'
         ? await f.call('POST', '/v1/submit', { cwd: f.root, request: { source: f.root, manifest, profile: 'check' } })
@@ -60,44 +61,49 @@ for (const route of ['submit', 'command', 'project'] as const) {
       assert.equal((await finish(f, started.body['operationId']))['exitCode'], 0);
       assert.deepEqual(f.executed.map(r => r.machine.id), ['first']);
       assert.equal(f.executed[0]?.placement?.strategy, 'load-aware');
+      assert.equal(f.executed[0]?.placement?.loadPerCpu, 8);
     } finally { await f.close(); }
   });
 }
 
-test('concurrent clients count new reservations even when their preflight snapshots are identical', async () => {
+test('concurrent clients enforce the worker slot limit even when memory snapshots tie', async () => {
   const releases: (() => void)[] = [];
   const { f, manifest } = await fixture('passed', request => new Promise(resolve => {
     releases.push(() => resolve(writeRun(request.paths.runsDir, request.jobId ?? 'fixture-job', { machine: request.machine.id })));
   }));
   try {
     const start = () => f.call('POST', '/v1/submit', { cwd: f.root, request: { source: f.root, manifest, profile: 'check' } });
-    const first = await start();
-    assert.equal(await waitUntil(() => f.executed.length === 1, 10_000), true);
-    const second = await start();
-    assert.equal(await waitUntil(() => f.executed.length === 2, 10_000), true);
-    assert.deepEqual(f.executed.map(r => r.machine.id), ['second', 'first']);
+    const operations = [];
+    for (let count = 1; count <= 4; count += 1) {
+      operations.push(await start());
+      assert.equal(await waitUntil(() => f.executed.length === count, 10_000), true);
+    }
+    assert.deepEqual(f.executed.map(r => r.machine.id), ['second', 'second', 'second', 'first']);
     releases.splice(0).forEach(release => release());
-    assert.equal((await finish(f, first.body['operationId']))['exitCode'], 0);
-    assert.equal((await finish(f, second.body['operationId']))['exitCode'], 0);
+    for (const operation of operations) {
+      assert.equal((await finish(f, operation.body['operationId']))['exitCode'], 0);
+    }
   } finally { releases.splice(0).forEach(release => release()); await f.close(); }
 });
 
-test('automatic external reservations choose a healthy worker and explicit lists stay binding', async () => {
+test('automatic external reservations choose the CPU-busier worker with healthier memory and explicit lists stay binding', async () => {
   const { f } = await fixture();
-  f.reports.set('Mac-Mini', report('first', { memPressureLevel: 2, cpuCount: 10, loadAverage: [20] }));
-  f.reports.set('OldMacBookPro', report('second', { memPressureLevel: 1, cpuCount: 10, loadAverage: [1] }));
+  const GiB = 1024 ** 3;
+  f.reports.set('Mac-Mini', report('first', { os: 'Darwin', memPressureLevel: 1, cpuCount: 10,
+    loadAverage: [80], memAvailableBytes: 6 * GiB, swapFreeBytes: 4 * GiB, swapDiskFreeBytes: 64 * GiB }));
+  f.reports.set('OldMacBookPro', report('second', { memPressureLevel: 1, cpuCount: 10, loadAverage: [1], memAvailableBytes: 8 * GiB }));
   try {
     const automatic = await f.call('POST', '/v1/reservations', { owner: 'auto-fixture', label: 'read-only route' });
     assert.equal(automatic.status, 200, automatic.text);
     const value = automatic.body['reservation'];
     assert.ok(value && typeof value === 'object' && 'machineId' in value && 'id' in value);
-    assert.equal(value.machineId, 'second');
+    assert.equal(value.machineId, 'first');
     assert.equal((await f.call('POST', '/v1/release', { id: value.id, token: automatic.body['token'] })).status, 200);
-    const pinned = await f.call('POST', '/v1/reservations', { owner: 'pinned-fixture', label: 'explicit route', machines: ['first'] });
+    const pinned = await f.call('POST', '/v1/reservations', { owner: 'pinned-fixture', label: 'explicit route', machines: ['second'] });
     assert.equal(pinned.status, 200, pinned.text);
     const lease = pinned.body['reservation'];
     assert.ok(lease && typeof lease === 'object' && 'machineId' in lease && 'id' in lease);
-    assert.equal(lease.machineId, 'first');
+    assert.equal(lease.machineId, 'second');
     assert.equal((await f.call('POST', '/v1/release', { id: lease.id, token: pinned.body['token'] })).status, 200);
   } finally { await f.close(); }
 });

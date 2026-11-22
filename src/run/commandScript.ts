@@ -44,6 +44,7 @@ export function renderCommandScript(input: {
   readonly extraArgs: readonly string[];
   readonly jobId: string;
   readonly label: string;
+  readonly finalizer?: boolean;
 }): string {
   const { profile, machine, extraArgs } = input;
   if (extraArgs.length > 0 && !profile.allowExtraArgs) {
@@ -69,7 +70,13 @@ export function renderCommandScript(input: {
     lines.push(`command -v ${shellQuote(tool)} >/dev/null 2>&1 || { printf '%s\\n' ${shellQuote(`fleet-runner: ${tool} is not on PATH`)} >&2; exit 127; }`);
   }
   if (profile.cwd !== '.') lines.push(`cd -- "$FLEET_RUNNER_SRC_DIR"/${shellQuote(profile.cwd)}`);
+  if (profile.cache?.setup && !input.finalizer) lines.push('python3 -B "$FLEET_RUNNER_JOB_DIR/meta/cache-setup.py"');
   for (const step of profile.prepare) lines.push(step.map((word) => renderWord(word, profile)).join(' '));
   lines.push(`exec ${[...profile.argv, ...extraArgs].map((word) => renderWord(word, profile)).join(' ')}`);
   return `${lines.join('\n')}\n`;
+}
+
+export function renderSetupScript(profile: Profile): string {
+  const steps = profile.cache?.setup?.steps ?? [];
+  return ['set -e', ...steps.map((step) => step.map((word) => renderWord(word, profile)).join(' ')), ''].join('\n');
 }

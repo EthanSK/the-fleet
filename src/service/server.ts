@@ -284,6 +284,8 @@ export function startApi(paths: StatePaths, coordinator = new Coordinator(paths)
     return createOperation(owner, meta, async (op, output) =>
       main(argv, { ...defaultContext(), transportFor, paths: runPaths, stdout: output, stderr: output, interrupts: op.interrupts, runOne: managedRunner(op),
         selectionUsage: (machine, report) => coordinator.selectionUsage(machine, report),
+        isManagedRunActive: (machine, jobId) => coordinator.reservationsFor(machine).some((lease) =>
+          lease.kind === 'managed' && lease.jobId === jobId && operations.get(lease.id)?.status === 'running'),
         onDiskSpaceProblem: op.onDiskSpaceProblem,
         beforePreflight: async (machine) => { await coordinator.maintain(machine.id, op.onDiskSpaceProblem); } }));
   }

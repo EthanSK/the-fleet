@@ -248,7 +248,9 @@ export async function runsView(paths: StatePaths, query: { readonly limit: numbe
   return { runs, runsDirectory };
 }
 
-export async function runDetailView(paths: StatePaths, jobId: string, tailBytes: number): Promise<Record<string, unknown>> {
+export async function locateRunReceipt(paths: StatePaths, jobId: string): Promise<{
+  directory: string; entry: RunIndexEntry | undefined; receipt: Receipt | undefined;
+}> {
   if (!JOB_ID.test(jobId)) throw usageError(`"${jobId}" is not a job id.`);
   const entry = readIndex(paths).find((candidate) => candidate.jobId === jobId);
   let directory = entry ? dirname(entry.receiptPath) : join(currentRunsDirectory(paths), jobId);
@@ -260,6 +262,11 @@ export async function runDetailView(paths: StatePaths, jobId: string, tailBytes:
       receipt = await readReceiptFile(join(directory, 'receipt.json'));
     }
   }
+  return { directory, entry, receipt };
+}
+
+export async function runDetailView(paths: StatePaths, jobId: string, tailBytes: number): Promise<Record<string, unknown>> {
+  const { directory, entry, receipt } = await locateRunReceipt(paths, jobId);
   if (!receipt) {
     if (!entry) throw notFound(`No receipt for ${jobId}.`);
     return { jobId, available: false, directory, run: unavailable(entry) };

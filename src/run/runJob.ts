@@ -20,7 +20,7 @@
 // drops the connection, which the supervisor also treats as a cancel.
 
 import { profileWorkload } from './capacity.ts';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createWriteStream, readFileSync, promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { Readable, type Writable } from 'node:stream';
@@ -37,7 +37,7 @@ import { readGitState, type GitState } from '../snapshot/gitState.ts';
 import { planSnapshot, formatMiB, type SnapshotPlan } from '../snapshot/select.ts';
 import { extractTarSafely, SourceChangedError, tarStream, type ExtractedFile, type TarMember } from '../snapshot/tar.ts';
 import { firstLines, type Transport } from '../transport/transport.ts';
-import { renderCommandScript } from './commandScript.ts';
+import { renderCommandScript, renderSetupScript } from './commandScript.ts';
 import { JobSession, TimeoutWaitingError } from './jobSession.ts';
 import { evaluatePreflight, formatDuration, type PreflightReport } from './preflight.ts';
 import { createRunDirectory, pruneAbandonedSourceStages, pruneRuns, readLogTail, writeReceipt, type Receipt, type RunAbort, type RunOutcomeKind } from './receipt.ts';
@@ -141,8 +141,13 @@ export async function planRun(request: Pick<RunRequest, 'project' | 'profileName
   const sync = request.project.manifest.sync;
   const plan = await planSnapshot(request.sourceRoot, { ...sync, include: [...sync.include, ...profile.extraInputs] });
   if (plan.entries.length === 0) throw usageError(`No files selected from ${plan.root}. Check sync.include.`);
+  for (const input of profile.cache?.setup?.inputs ?? []) {
+    if (!plan.entries.some((entry) => entry.kind === 'file' && entry.relativePath === input)) {
+      throw usageError(`Cached setup input ${input} must be a selected regular file.`);
+    }
+  }
   const git = await readGitState(plan.root);
-  const finalizerScript = profile.finalizer === undefined ? undefined : renderCommandScript({ profile: { ...profile, argv: profile.finalizer.argv, prepare: [], requires: { ...profile.requires, tools: [] } }, machine: request.machine, extraArgs: [], jobId, label });
+  const finalizerScript = profile.finalizer === undefined ? undefined : renderCommandScript({ profile: { ...profile, argv: profile.finalizer.argv, prepare: [], requires: { ...profile.requires, tools: [] } }, machine: request.machine, extraArgs: [], jobId, label, finalizer: true });
   return { profile, plan, git, script, label, ...(finalizerScript === undefined ? {} : { finalizerScript }) };
 }
 
@@ -168,6 +173,22 @@ export function uploadMembers(plan: SnapshotPlan, profile: Profile, script: stri
     }
   }
   if (profile.cache) members.push(text('meta/cache', `${profile.cache.name} ${Math.round(profile.cache.maxGiB * 1024 * 1024)}\n`));
+  if (profile.cache?.setup) {
+    const { directory, inputs, runtime, keyEnv, declaredEnv } = profile.cache.setup;
+    const declared = { ...profile.env, ...machine?.env };
+    // Use the values before the job-path placeholders expand, otherwise
+    // an isolated TMP/cache path would invalidate an otherwise identical setup.
+    const setupNames = declaredEnv === undefined ? undefined : new Set([...declaredEnv, ...keyEnv]);
+    const declarations = Object.entries(declared)
+      .filter(([name]) => setupNames === undefined || setupNames.has(name))
+      .sort(([left], [right]) => left.localeCompare(right));
+    const declaredEnvironment = createHash('sha256').update(JSON.stringify(declarations)).digest('hex');
+    const environment = [...new Set(keyEnv.filter((name) => !Object.hasOwn(declared, name)))].sort();
+    const executionOnlyEnvironment = Object.keys(declared).filter((name) => setupNames !== undefined && !setupNames.has(name));
+    members.push(text('meta/cache-setup.json', JSON.stringify({ directory, inputs, runtime, environment, declaredEnvironment, executionOnlyEnvironment, maxKiB: Math.round(profile.cache.maxGiB * 1024 ** 2) })));
+    members.push(text('meta/cache-setup.sh', renderSetupScript(profile), 0o700));
+    members.push(text('meta/cache-setup.py', readFileSync(new URL('../../remote/cache_setup.py', import.meta.url), 'utf8')));
+  }
   if (profile.isolatedTmp) members.push(text('meta/isolated-tmp', ''));
   for (const entry of plan.entries) members.push({ kind: 'snapshot', name: `src/${entry.relativePath}`, entry });
   return members;
@@ -254,6 +275,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
   sessionStarting();
   const session = new JobSession(transport, command, nonce, {
     onProtocol: (line) => {
+      if (line.word === 'FINALIZING') io.status(`Finalizing on ${machine.id}.`);
       if (line.word !== 'DISK-SPACE') return;
       const problem = parseArchiveDiskSpaceProblem(line.rest, machine.id);
       if (problem) reportDiskSpaceProblem(io.onDiskSpaceProblem, problem);
@@ -308,7 +330,8 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
         if (!profile.cache) throw usageError('Rsync needs a named cache with a size limit.');
         const configuration = {
           project: request.project.manifest.id, cache: profile.cache.name,
-          cacheBytes: Math.floor(profile.cache.maxGiB * 1024 ** 3),
+          worktree: createHash('sha256').update(plan.root).digest('hex'),
+          cacheMaxKiB: Math.round(profile.cache.maxGiB * 1024 ** 2),
           cacheConcurrent: profile.cache.concurrent === true,
           maxBytes: Math.floor(request.project.manifest.sync.maxTotalMiB * 1024 ** 2),
           maxFileBytes: Math.floor(request.project.manifest.sync.maxFileMiB * 1024 ** 2),
@@ -349,12 +372,15 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
       return session.waitFor(['RESULT'], machine.limits.terminateGraceSeconds * 1000 + 60_000);
     });
     applyRemoteResult(result.rest, state);
+    io.status(`Job ended on ${machine.id}. Waiting for output and cleanup.`);
 
     // ---- artifacts, cleanup, lock release
     const next = await session.waitFor(['ARTIFACTS', 'BYE'], timing.finishTimeoutMs);
     if (next.word === 'ARTIFACTS') {
+      io.status(`Receiving output from ${machine.id}.`);
       try {
         await session.artifactsWritten();
+        io.status(`Verifying output from ${machine.id}.`);
         const expectedHashes = new Map(session.linesWith('AF').map((line) => {
           const space = line.rest.indexOf(' ');
           return [line.rest.slice(space + 1), line.rest.slice(0, space)] as const;
@@ -372,6 +398,7 @@ async function executeProfile(request: RunRequest, sessionStarting: () => void):
         }
         artifactContentVerified = true;
         session.send('ACK');
+        io.status(`Output verified. Waiting for cleanup on ${machine.id}.`);
       } catch (error) {
         state.artifactError = error instanceof FleetError ? error : new FleetError('artifactVerification', String(error));
         session.send('NACK');

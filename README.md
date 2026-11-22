@@ -159,12 +159,11 @@ the-fleet run example test --source /path/to/another/worktree
 
 One-time requests are not registered. Saved manifests live wherever their owner
 chooses; registrations store a pointer and source root in the private state
-directory. Unpinned runs compare eligible ships' current memory pressure,
-CPU load per core and occupied job-slot fraction, then available RAM and disk.
-The default ship breaks otherwise equal choices. Saved runs, one-time submit
-requests and automatic external reservations use this same load comparison.
-Fresh coordinator reservations count immediately, before CPU observations catch
-up, so simultaneous clients do not all choose an apparently idle ship.
+directory. Unpinned runs compare eligible ships by memory pressure, then by
+available RAM plus usable swap. With equal headroom, more available RAM wins,
+then the saved default. Saved runs, one-time submits and automatic external
+reservations use the same comparison. CPU load is diagnostic. The coordinator
+still checks live reservations and resource conflicts at admission.
 A manifest's explicit `defaultMachine` preserves a project-specific ship rule.
 Use `--machine worker` to pin a saved run or one-time submit to one ship.
 Use `--machines first,second` for an ordered list of candidates. Submit rejects
@@ -189,8 +188,8 @@ For the complete existing manifest contract, use
 the shorthand fields. `manifest` is the same schema-version-1 object used in
 `the-fleet.json`; all exclusions, byte limits, extra inputs, environment, finalizer,
 temporary-folder and output settings go through the same validator. No project
-registration is created. Keep `manifest.id` stable to reuse that project's rsync
-source copy; a cache name alone does not identify a project.
+registration is created. Keep `manifest.id` stable to reuse verified rsync baselines for that project's
+worktrees. A cache name alone does not identify a project.
 
 `submit request.json --dry-run [--machine worker]` returns the existing source
 plan, including `source.digest`, without contacting a ship or starting a job.
@@ -258,9 +257,11 @@ writes instead of quietly filling another disk; settings remain accessible.
 
 Ordinary managed jobs share a ship, up to private ship setting
 `limits.maxConcurrentJobs` (default 2, range 1–16). These are **job slots**,
-not estimates of a job's future CPU/RAM use. Fresh disk, available memory and
-kernel-pressure checks still apply; CPU load informs automatic placement and
-is also reported for the caller's judgment; job slots still cannot predict the cost of a new job, so CPU overcommit remains possible. Raw swap is display-only.
+not estimates of a job's future CPU/RAM use. Disk and configured memory-pressure
+limits still apply. The memory floor (`limits.minAvailableMemoryGiB`) uses
+estimated available RAM plus unused swap reported by that OS. On macOS the swap
+volume must also meet `limits.minFreeDiskGiB` before swap counts. Free disk does
+not count as swap capacity, and host swap does not extend a guest VM.
 
 Browser/E2E work also respects `limits.maxConcurrentE2eJobs`. Omit it to keep
 older inventories' ordinary limit. Raising ordinary capacity need not raise this
@@ -292,11 +293,11 @@ particular job even when a slot is free.
 
 A named cache remains serialized unless its owner explicitly sets
 `cache.concurrent: true` after checking its tools support simultaneous use.
-Concurrent users can share the same cache name. Mutable retained rsync source
-is guarded per cache/project. When a concurrent upload finds that copy busy,
-it uses the existing disposable job source instead of waiting; a full cache
-uses the same fallback. This may send a full source copy instead of a warm
-delta. Execution always uses an independent verified copy. On Apple rsync,
+Concurrent users can share the same cache name. Each worktree has a verified
+rsync baseline that jobs copy into their own private trees. A full cache
+can still run with disposable source. The optional `cache.setup` can reuse
+installed dependencies with private copies on macOS. See the
+[execution guide](docs/execution.md#reusing-installed-dependencies). On macOS,
 the sender uses the OS file cache when supported; older/GNU receivers keep
 their existing options. Fully ephemeral controller source copies use
 `source-staging.noindex` under the Fleet state home, normally on the internal
@@ -366,9 +367,10 @@ can be counted in several processes. Raw swap remains display-only.
 
 `the-fleet maintain [--machine worker]` inspects and automatically reclaims only
 an exact, marked stale Fleet job. The same bounded foreground check runs before
-managed-job admission and external reservation requests. It preserves every
-existing reservation, including expired/unverified external ownership and active
-managed work. Read-only discovery never cleans anything; no background watcher,
+managed-job admission and external reservation requests. This check can release
+an unverified managed reservation when the worker proves that job's cleanup
+is complete. External reservations and active managed work stay protected.
+Read-only discovery never cleans anything; no background watcher,
 retry queue, arbitrary app termination or service restart is installed.
 
 Cleanup rechecks the observed job under the existing permanent kernel admission
@@ -376,7 +378,12 @@ guard. Its supervisor, job group, upload and finalizer must be gone. A missing
 marker, changed job, symlink or unknown owner is retained. Existing finalizers and
 bounded output capture run before scratch deletion, preserving failed evidence
 and pending outputs. An uncertain cleanup keeps coordinator ownership for recovery.
-Interrupted managed reservations still use `recover-reservations`. External
+Use `recover-reservations` to reconcile all interrupted managed reservations in
+one lightweight inspection per worker. A finished job with a matching result,
+finished finalizer and no remaining lock or scratch can be reconciled while
+another job runs. An absent job without that completion evidence needs an
+idle worker. A matching stale lock retains ownership for guarded cleanup even
+after the process exits. Recovery leaves retained outputs in place. External
 work uses its token for normal release or exact recovery for an expired claim.
 The latest maintenance result is
 included in ship state with its observation time.

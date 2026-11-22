@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { PassThrough } from 'node:stream';
 import { Coordinator, type CoordinatorDependencies } from '../src/service/coordinator.ts';
 import { inlineProject } from '../src/service/server.ts';
 import { assessMemory } from '../src/run/memoryAssessment.ts';
@@ -12,6 +13,7 @@ import { fetchPreflight, runControl } from '../src/run/remoteChecks.ts';
 import { report } from './helpers/serviceFixture.ts';
 import { testEnvironment, testMachine, writeFiles } from './helpers/fixtures.ts';
 import type { RunRequest, RunResult } from '../src/run/runJob.ts';
+import type { RemoteExit } from '../src/transport/transport.ts';
 
 function fixture() {
   const env = testEnvironment();
@@ -38,6 +40,42 @@ function fixture() {
     calls: () => calls, advance: () => { now += 60_000; } };
 }
 const stale = () => report('worker', { lock: { state: 'stale', jobId: 'old', label: 'fixture' } });
+
+test('worker recovery proof requires the exact cleaned-up job and preserves its pending archive', async () => {
+  const env = testEnvironment();
+  try {
+    const marker = { '.fleet-job': '', result: 'job_id=released\nended=123\nstuck=0\n', 'artifacts.pending': '', 'artifacts.tar': 'keep me',
+      'meta/finalizer.sh': 'exit 0\n', 'finalizer.done': '' };
+    writeFiles(join(env.remoteRoot, 'jobs/released'), marker);
+    writeFiles(join(env.remoteRoot, 'jobs/unfinished'), { ...marker, result: 'job_id=unfinished\nended=123\nstuck=0\n', 'src/output': 'still live scratch' });
+    writeFiles(join(env.remoteRoot, 'jobs/locked'), { ...marker, result: 'job_id=locked\nended=123\nstuck=0\n' });
+    writeFiles(join(env.remoteRoot, 'locks/shared/locked'), { owner: 'job_id=locked\n' });
+    writeFiles(join(env.remoteRoot, 'jobs/finalizer-failed'), { '.fleet-job': '', 'meta/finalizer.sh': 'exit 1\n', result: 'job_id=finalizer-failed\nended=123\nstuck=0\n' });
+    const checked = await fetchPreflight(env.transport, testMachine(), [], [], ['released', 'unfinished', 'locked', 'finalizer-failed', 'missing']);
+    assert.deepEqual(checked.releasedJobs, ['released']);
+    assert.equal(readFileSync(join(env.remoteRoot, 'jobs/released/artifacts.tar'), 'utf8'), 'keep me');
+    assert.ok(existsSync(join(env.remoteRoot, 'jobs/released/artifacts.pending')));
+  } finally { env.cleanup(); }
+});
+
+test('automatic stale cleanup can wait for the full worker finalizer budget', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  const stdout = new PassThrough();
+  let exit!: (result: RemoteExit) => void;
+  const exited = new Promise<RemoteExit>((resolve) => { exit = resolve; });
+  const kill = context.mock.fn(() => exit({ code: null, signal: 'SIGTERM' }));
+  const transport = {
+    description: 'maintenance fixture',
+    start: () => ({ stdin: new PassThrough(), stdout, stderr: new PassThrough(), exited, kill }),
+    isConnectionFailure: () => false,
+  };
+  const result = runControl(transport, testMachine(), 'reap-stale', 'old');
+  context.mock.timers.tick(300_001);
+  stdout.write('result=cleared old\n');
+  exit({ code: 0, signal: null });
+  assert.deepEqual(await result, { result: 'cleared', detail: 'old' });
+  assert.equal(kill.mock.callCount(), 0);
+});
 
 test('state remains read-only; foreground maintenance clears an exact abandoned job', async () => {
   const f = fixture();

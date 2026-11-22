@@ -12,7 +12,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { listRegistrations, loadMachines, loadProject, selectMachine } from '../registry.ts';
-import { evaluatePreflight, describeLock, formatGiB, type PreflightReport } from '../run/preflight.ts';
+import { evaluatePreflight, describeLock, formatGiB, usableSwapBytes, type PreflightReport } from '../run/preflight.ts';
 import { fetchPreflight } from '../run/remoteChecks.ts';
 import type { Machine } from '../schema/machines.ts';
 import type { ProjectManifest } from '../schema/manifest.ts';
@@ -143,7 +143,7 @@ async function checkMachine(context: CliContext, report: Report, machine: Machin
     report.line(refusalKinds.has('disk') ? 'fail' : 'ok', `Free disk ${formatGiB(preflight.diskFreeBytes)} (minimum ${machine.limits.minFreeDiskGiB} GiB)`);
   }
   if (preflight.memAvailableBytes !== undefined) {
-    report.line(refusalKinds.has('memory') ? 'warn' : 'ok', `Available memory about ${formatGiB(preflight.memAvailableBytes)} of ${formatGiB(preflight.memTotalBytes ?? 0)} (estimate from vm_stat; minimum ${machine.limits.minAvailableMemoryGiB} GiB)`);
+    report.line(refusalKinds.has('memory') ? 'warn' : 'ok', `About ${formatGiB(preflight.memAvailableBytes)} available RAM + ${formatGiB(usableSwapBytes(preflight, machine))} usable swap (minimum ${machine.limits.minAvailableMemoryGiB} GiB combined)`);
   }
   if (preflight.memPressureLevel !== undefined) {
     const label = preflight.memPressureLevel >= 4 ? 'critical' : preflight.memPressureLevel >= 2 ? 'elevated' : 'normal';

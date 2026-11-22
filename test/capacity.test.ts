@@ -129,28 +129,20 @@ test('a concurrent cache over its retention cap still accepts isolated rsync sou
   } finally { a.interrupts?.trigger(); b.interrupts?.trigger(); await Promise.allSettled([first, second]); f.env.cleanup(); }
 });
 
-test('cache measurement tolerates a real entry disappearing after the directory scan', () => {
+test('cache measurement discards an incomplete du total', () => {
   const f = fixture();
   try {
-    // Execute the actual production helper, with a deterministic filesystem
-    // race: the walk lists a real file and a neighbour deletes it before stat.
     const directory = join(f.env.root, 'measurement'); mkdirSync(directory);
-    execFileSync('python3', ['-c', `import ast, os, stat, sys
+    execFileSync('python3', ['-c', `import ast, subprocess, sys
 source = ast.parse(open(sys.argv[1]).read())
-function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == 'cache_bytes')
-namespace = {'os': os, 'stat': stat, 'active': lambda: None}
+function = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == 'allocated_kib')
+namespace = {'subprocess': subprocess}
 exec(compile(ast.Module(body=[function], type_ignores=[]), sys.argv[1], 'exec'), namespace)
-directory = sys.argv[2]
-open(os.path.join(directory, 'stable'), 'wb').write(b'1234')
-open(os.path.join(directory, 'vanishing'), 'wb').write(b'gone')
-walk = os.walk
-def raced_walk(*args, **kwargs):
-    for parent, directories, files in walk(*args, **kwargs):
-        if 'vanishing' in files:
-            os.unlink(os.path.join(parent, 'vanishing'))
-        yield parent, directories, files
-os.walk = raced_walk
-assert namespace['cache_bytes'](directory) == 4
+assert namespace['allocated_kib'](sys.argv[2], ()) is not None
+def incomplete_du(command, **kwargs):
+    raise subprocess.CalledProcessError(1, command, output=b'8\\tpartial total\\n')
+subprocess.check_output = incomplete_du
+assert namespace['allocated_kib'](sys.argv[2], ()) is None
 `, new URL('../remote/rsync_worker.py', import.meta.url).pathname, directory]);
   } finally { f.env.cleanup(); }
 });

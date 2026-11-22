@@ -58,6 +58,10 @@ export interface PreflightReport {
   /** macOS kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical. */
   readonly memPressureLevel?: number;
   readonly swapUsedMiB?: number;
+  /** Unused space in swap the worker OS already provides. */
+  readonly swapFreeBytes?: number;
+  /** Free space on the macOS swap volume, which may differ from the job disk. */
+  readonly swapDiskFreeBytes?: number;
   /** Top 20 by resident memory, names only. Never used for kill/admission policy. */
   readonly processes?: readonly ProcessSnapshot[];
   readonly processCount?: number;
@@ -75,6 +79,8 @@ export interface PreflightReport {
   readonly managedPgids?: readonly number[];
   /** Fresh kernel probe used for recovery, never inferred from owner files. */
   readonly admissionFree?: boolean;
+  /** Exact terminated jobs whose worker lock and scratch have been released. */
+  readonly releasedJobs?: readonly string[];
 }
 
 function optionalNumber(value: string | undefined): number | undefined {
@@ -100,6 +106,7 @@ export function parsePreflight(text: string): PreflightReport {
   const sharedLocks: LockState[] = [];
   const sharedWorkloads: Record<string, 'standard' | 'e2e'> = {};
   const managedPgids: number[] = [];
+  const releasedJobs: string[] = [];
   for (const line of text.split('\n')) {
     const equals = line.indexOf('=');
     if (equals <= 0) continue;
@@ -113,6 +120,8 @@ export function parsePreflight(text: string): PreflightReport {
       if (id && (workload === 'standard' || workload === 'e2e')) sharedWorkloads[id] = workload;
     } else if (key === 'managed_pgid') {
       if (/^[1-9][0-9]*$/.test(value)) managedPgids.push(Number(value));
+    } else if (key === 'released_job') {
+      if (/^[a-z0-9][a-z0-9-]*$/.test(value)) releasedJobs.push(value);
     } else if (key === 'tool') {
       const [name = '', status] = value.split(' ');
       tools.set(name, status === 'found');
@@ -127,6 +136,8 @@ export function parsePreflight(text: string): PreflightReport {
   }
   const diskFreeKiB = optionalNumber(values.get('disk_free_kb'));
   const swapUsedMiB = optionalNumber(values.get('swap_used_mb'));
+  const swapFreeBytes = optionalNumber(values.get('swap_free_bytes'));
+  const swapDiskFreeBytes = optionalNumber(values.get('swap_disk_free_bytes'));
   const memTotalBytes = optionalNumber(values.get('mem_total_bytes'));
   const memAvailableBytes = optionalNumber(values.get('mem_available_bytes'));
   const memPressureLevel = optionalNumber(values.get('mem_pressure_level'));
@@ -167,6 +178,8 @@ export function parsePreflight(text: string): PreflightReport {
     ...(memAvailableBytes === undefined ? {} : { memAvailableBytes }),
     ...(memPressureLevel === undefined ? {} : { memPressureLevel }),
     ...(swapUsedMiB === undefined ? {} : { swapUsedMiB }),
+    ...(swapFreeBytes === undefined || swapFreeBytes < 0 ? {} : { swapFreeBytes }),
+    ...(swapDiskFreeBytes === undefined || swapDiskFreeBytes < 0 ? {} : { swapDiskFreeBytes }),
     ...(processes === undefined ? {} : { processes }),
     ...(processCount === undefined ? {} : { processCount }),
     processSampleComplete: values.get('process_sample') === '1' && processes !== undefined,
@@ -180,6 +193,7 @@ export function parsePreflight(text: string): PreflightReport {
     lock: parseLockState(values.get('lock') ?? 'busy - - - unknown'),
     sharedLocks, sharedWorkloads,
     managedPgids,
+    ...(releasedJobs.length === 0 ? {} : { releasedJobs }),
     ...(values.has('admission_free') ? { admissionFree: values.get('admission_free') === '1' } : {}),
   };
 }
@@ -195,6 +209,20 @@ export interface PreflightDecision {
 }
 
 const GIB = 1024 ** 3;
+
+export function usableSwapBytes(report: PreflightReport, machine: Machine): number {
+  // "I don't care how slow it runs there as long as it doesn't crash."
+  // Credit only swap the worker's kernel already reports as free. On macOS
+  // keep the configured disk reserve on its swap volume as well as the job disk.
+  // Host swap is not swap inside a guest VM.
+  if (report.os === 'Darwin' && (report.swapDiskFreeBytes ?? -1) < machine.limits.minFreeDiskGiB * GIB) return 0;
+  return report.swapFreeBytes ?? 0;
+}
+
+export function memoryHeadroomBytes(report: PreflightReport, machine: Machine): number | undefined {
+  if (report.memAvailableBytes === undefined) return undefined;
+  return report.memAvailableBytes + usableSwapBytes(report, machine);
+}
 
 export function formatGiB(bytes: number): string {
   return `${(bytes / GIB).toFixed(1)} GiB`;
@@ -268,10 +296,11 @@ export function evaluatePreflight(
   if (report.diskFreeBytes !== undefined && report.diskFreeBytes < limits.minFreeDiskGiB * GIB) {
     refusals.push({ kind: 'disk', message: `Not enough free disk on ${machine.id}: ${formatGiB(report.diskFreeBytes)} free, ${limits.minFreeDiskGiB} GiB required` });
   }
-  if (report.memAvailableBytes !== undefined && report.memAvailableBytes < limits.minAvailableMemoryGiB * GIB) {
+  const memoryHeadroom = memoryHeadroomBytes(report, machine);
+  if (memoryHeadroom !== undefined && memoryHeadroom < limits.minAvailableMemoryGiB * GIB) {
     refusals.push({
       kind: 'memory',
-      message: `Not enough available memory on ${machine.id}: about ${formatGiB(report.memAvailableBytes)}, ${limits.minAvailableMemoryGiB} GiB required`,
+      message: `Not enough available memory on ${machine.id}: about ${formatGiB(memoryHeadroom)} RAM plus usable swap, ${limits.minAvailableMemoryGiB} GiB required`,
     });
   }
   if (report.memPressureLevel !== undefined && report.memPressureLevel >= 2) {

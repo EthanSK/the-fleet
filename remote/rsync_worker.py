@@ -1,8 +1,6 @@
-# Inline worker for opt-in rsync source transfer. The named profile cache owns
-# one marked source copy per project. Only filtered source goes there; command
-# scripts, machine env and other per-job metadata never enter the cache.
-# A dirty marker makes interrupted copies disposable at the next guarded sync.
-# Execution always uses a fresh copy, never hardlinks to mutable cached files.
+# Inline worker for opt-in rsync source transfer. Only a verified filtered
+# source tree can replace a worktree's baseline. Rsync updates a private
+# copy, so another upload never mutates the baseline or the job's checkout.
 import hashlib
 import fcntl
 import json
@@ -17,8 +15,6 @@ import sys
 job, guard_text, *arguments = sys.argv[1:]
 guard = int(guard_text)
 root = os.path.dirname(os.path.dirname(job))
-source_owner = None
-tree = None
 identifier = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$')
 
 def fail(message):
@@ -49,28 +45,62 @@ def read_meta(name):
 def safe_relative(path):
     return isinstance(path, str) and path and not path.startswith('/') and posixpath.normpath(path) == path and path != '..' and not path.startswith('../') and not any(ord(char) < 32 or ord(char) == 127 for char in path)
 
-def cache_bytes(directory):
-    total = 0
-    for parent, directories, files in os.walk(directory, followlinks=False):
-        active()
-        for name in directories + files:
-            try:
-                info = os.lstat(os.path.join(parent, name))
-            except FileNotFoundError:
-                # Concurrent cache tools rename temporary entries normally.
-                # Only this approximate measurement tolerates vanished files;
-                # verify_tree still checks every declared source byte.
-                continue
-            if stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                total += info.st_size
-    return total
+def allocated_kib(directory, held_guards):
+    # Match the eviction check. A changing cache can make du fail even
+    # when it prints a subtotal; that subtotal cannot authorize publication.
+    try:
+        output = subprocess.check_output(['/usr/bin/du', '-sk', directory],
+                                         stderr=subprocess.DEVNULL, pass_fds=held_guards)
+        return int(output.split(maxsplit=1)[0])
+    except (OSError, subprocess.CalledProcessError, ValueError, IndexError):
+        return None
 
-def discard_tree():
-    if tree is not None and os.path.lexists(tree):
-        if os.path.islink(tree) or not os.path.isdir(tree):
-            os.unlink(tree)
-        else:
-            shutil.rmtree(tree)
+def copy_tree(source, destination, held_guards):
+    if sys.platform == 'darwin':
+        subprocess.run(['/bin/cp', '-cRpP', source, destination], check=True,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, pass_fds=held_guards)
+    else:
+        shutil.copytree(source, destination, symlinks=True)
+
+def baseline_path(cache, project, worktree):
+    sources = safe_directory(cache, '.fleet-runner-worktrees')
+    owner = safe_directory(safe_directory(sources, project), worktree)
+    baseline = os.path.join(owner, 'tree')
+    if os.path.lexists(baseline) and not stat.S_ISDIR(os.lstat(baseline).st_mode):
+        fail('source baseline is not a directory')
+    return baseline
+
+def publish_baseline(cache, baseline, seeded_inode, tree, limit, publication_guard, held_guards):
+    # Build the replacement privately. All jobs share the same short cache
+    # publication lock, while their actual network transfers overlap.
+    pending = os.path.join(job, 'source-baseline.noindex')
+    previous = os.path.join(job, 'source-previous.noindex')
+    fcntl.flock(publication_guard, fcntl.LOCK_EX)
+    try:
+        current_inode = os.lstat(baseline).st_ino if os.path.isdir(baseline) else None
+        if current_inode != seeded_inode:
+            return 'kept source baseline published by a concurrent job'
+        try:
+            copy_tree(tree, pending, held_guards)
+        except (OSError, subprocess.CalledProcessError):
+            return 'source cache copy failed; using disposable job source'
+        pending_kib = allocated_kib(pending, held_guards)
+        current_kib = allocated_kib(baseline, held_guards) if current_inode is not None else 0
+        cache_kib = allocated_kib(cache, held_guards)
+        active()
+        if pending_kib is None or current_kib is None or cache_kib is None or current_kib > cache_kib:
+            return 'source cache size unverified; using disposable job source'
+        if cache_kib - current_kib + pending_kib > limit:
+            return 'source cache full; using disposable job source'
+        if current_inode is not None:
+            os.rename(baseline, previous)
+        os.rename(pending, baseline)
+    finally:
+        fcntl.flock(publication_guard, fcntl.LOCK_UN)
+        # A refused or partial clone belongs to this upload. Free it before
+        # execution, especially when a non-APFS worker makes a full copy.
+        shutil.rmtree(pending, ignore_errors=True)
+    return 'published verified worktree baseline'
 
 def file_digest(path, entry):
     digest = hashlib.sha256()
@@ -121,12 +151,13 @@ try:
     project = config['project']
     cache_name = config['cache']
     concurrent_cache = config.get('cacheConcurrent') is True
-    if not identifier.fullmatch(project) or not identifier.fullmatch(cache_name):
-        fail('invalid source cache name')
+    worktree = config['worktree']
+    if not identifier.fullmatch(project) or not identifier.fullmatch(cache_name) or not re.fullmatch('[0-9a-f]{64}', worktree):
+        fail('invalid source cache name or worktree key')
     cache_key = hashlib.sha256(cache_name.encode()).hexdigest()
     cache_usage_guard = os.open(os.path.join(root, 'locks', 'cache-usage-' + cache_key), os.O_CREAT | os.O_RDWR, 0o600)
     fcntl.flock(cache_usage_guard, fcntl.LOCK_SH)
-    max_bytes, max_file, cache_limit = (config[name] for name in ('maxBytes', 'maxFileBytes', 'cacheBytes'))
+    max_bytes, max_file, cache_limit = (config[name] for name in ('maxBytes', 'maxFileBytes', 'cacheMaxKiB'))
     if any(type(value) is not int or value <= 0 for value in (max_bytes, max_file, cache_limit)):
         fail('invalid source size limit')
     manifest = read_meta('source-manifest.tsv')
@@ -162,111 +193,51 @@ try:
             fail('invalid source entry kind')
     if not entries or total > max_bytes or int(read_meta('expected-count')) != len(entries) or set(entries) & parents:
         fail('invalid source file set or size')
-    # Concurrent jobs need not queue behind another upload's mutable source.
-    # Reuse the existing disposable-source path when its retained copy is busy;
-    # exclusive caches still serialize under their normal source guard.
-    source_key = hashlib.sha256((cache_name + '/' + project).encode()).hexdigest()
-    source_guard = os.open(os.path.join(root, 'locks', 'source-' + source_key), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(source_guard, fcntl.LOCK_EX | (fcntl.LOCK_NB if concurrent_cache else 0))
-    except BlockingIOError:
-        os.close(source_guard)
-        source_guard = None
-    active()
     cache = safe_directory(safe_directory(root, 'cache'), cache_name)
-    retained_tree = None
-    if source_guard is None:
-        tree = os.path.join(job, 'source-rsync.noindex')
-        dirty = os.path.join(job, 'source-rsync.dirty')
-        print('fleet-runner: source cache busy; using disposable job source', file=sys.stderr)
-    else:
-        sources = safe_directory(cache, '.fleet-runner-sources')
-        source_owner = safe_directory(sources, project)
-        marker = os.path.join(source_owner, '.fleet-source')
-        if os.path.lexists(marker):
-            if os.path.islink(marker) or open(marker).read() != project:
-                fail('source cache ownership differs')
-        elif os.listdir(source_owner):
-            fail('source cache has no ownership marker')
-        else:
-            with open(marker, 'x') as output:
-                output.write(project)
-        retained_tree = tree = os.path.join(source_owner, 'tree')
-        dirty = os.path.join(source_owner, 'dirty')
-        if os.path.lexists(dirty) or (os.path.lexists(tree) and not os.path.isdir(tree)) or os.path.islink(tree):
-            discard_tree()
-        # Include rsync's temporary replacement bytes, not just its final tree.
-        # Never evict another cache consumer's dependencies to make source fit.
-        reserve = 2 * total + 256 * len(entries)
-        if cache_bytes(cache) + reserve > cache_limit:
-            discard_tree()
-        if cache_bytes(cache) + reserve > cache_limit:
-            if not concurrent_cache and cache_bytes(cache) > cache_limit:
-                fail('named cache exceeds its limit; unrelated dependencies were preserved')
-            # Retention cannot fit; this job's private copy needs no source lock.
-            tree = os.path.join(job, 'source-rsync.noindex')
-            dirty = os.path.join(job, 'source-rsync.dirty')
-            os.close(source_guard)
-            source_guard = None
-            print('fleet-runner: source cache full; using disposable job source', file=sys.stderr)
-    with os.fdopen(os.open(dirty, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), 'w') as output:
+    publication_guard = os.open(os.path.join(root, 'locks', 'source-publish-' + cache_key),
+                                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    held_guards = (guard, cache_usage_guard, publication_guard)
+    tree = os.path.join(job, 'source-rsync.noindex')
+    dirty = os.path.join(job, 'source-rsync.dirty')
+    with open(dirty, 'x') as output:
         output.write('sync in progress')
-    if tree == retained_tree:
-        safe_directory(source_owner, 'tree')
-    else:
-        safe_directory(job, 'source-rsync.noindex')
-    held_guards = (guard, cache_usage_guard) + (() if source_guard is None else (source_guard,))
+
+    fcntl.flock(publication_guard, fcntl.LOCK_SH)
+    try:
+        baseline = baseline_path(cache, project, worktree)
+        seeded_inode = None
+        if not concurrent_cache:
+            cache_kib = allocated_kib(cache, held_guards)
+            if cache_kib is not None and cache_kib > cache_limit:
+                fail('named cache exceeds its limit; unrelated dependencies were preserved')
+        if os.path.isdir(baseline):
+            seeded_inode = os.lstat(baseline).st_ino
+            copy_tree(baseline, tree, held_guards)
+            print('fleet-runner: seeded private source from verified worktree baseline', file=sys.stderr)
+        else:
+            os.mkdir(tree, 0o700)
+    finally:
+        fcntl.flock(publication_guard, fcntl.LOCK_UN)
+    active()
     # Apple forwards its local disk-cache option to the peer. Keep it sender
     # local so older/GNU receivers keep their existing supported options.
     receiver_arguments = [argument for argument in arguments[:-1] if argument != '--cache']
     status = subprocess.call(['/usr/bin/rsync', *receiver_arguments, tree + '/'], pass_fds=held_guards)
     if status != 0:
         fail('rsync receiver failed')
-    active()
     verify_tree(tree, entries, parents)
-    cache_overflow = cache_bytes(cache) > cache_limit
-    if cache_overflow and not concurrent_cache:
-        fail('named cache exceeded its limit')
-    destination = os.path.join(job, 'src')
-    os.mkdir(destination, 0o700)
-    for parent in sorted(parents, key=lambda value: (value.count('/'), value)):
-        os.mkdir(os.path.join(destination, parent), 0o755)
-    for relative, entry in entries.items():
-        active()
-        target = os.path.join(destination, relative)
-        if entry['kind'] == 'link':
-            os.symlink(entry['target'], target)
-            continue
-        digest = hashlib.sha256()
-        copied = 0
-        with os.fdopen(os.open(os.path.join(tree, relative), os.O_RDONLY | os.O_NOFOLLOW), 'rb') as source, open(target, 'xb') as output:
-            while True:
-                active()
-                data = source.read(1024 * 1024)
-                if not data:
-                    break
-                copied += len(data)
-                if copied > entry['size']:
-                    fail('source grew during materialization')
-                output.write(data)
-                digest.update(data)
-        if copied != entry['size'] or digest.hexdigest() != entry['sha256']:
-            fail('source changed during materialization')
-        os.chmod(target, entry['mode'])
-    verify_tree(destination, entries, parents)
     active()
-    # A concurrent neighbour may grow dependencies during our transfer. The
-    # cap governs retention, not admission: discard only our own retained
-    # source, after the independent execution copy has been fully verified.
-    if concurrent_cache and cache_overflow and tree == retained_tree:
-        discard_tree()
+    # The private receiver tree is the exact tree verified above. No digest
+    # from a neighbour or published baseline can authorize execution.
+    publication = publish_baseline(cache, baseline, seeded_inode, tree, cache_limit, publication_guard, held_guards)
+    print('fleet-runner: ' + publication, file=sys.stderr)
+    active()
+    os.rename(tree, os.path.join(job, 'src'))
     with open(os.path.join(job, 'meta', 'rsync-verified'), 'x') as output:
         output.write(config['digest'])
     os.unlink(dirty)
 except Exception as error:
-    # Only our guarded retained source or this job's private source is disposable.
-    # A hard kill leaves dirty in place for its next guarded sync/normal job cleanup.
-    if tree is not None:
-        discard_tree()
+    # Only the exact job owns its private receiving/publishing trees. The
+    # supervisor's existing upload guard stops this process before cleanup.
     print('fleet-runner: ' + str(error), file=sys.stderr)
     sys.exit(1)

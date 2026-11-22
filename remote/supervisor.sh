@@ -267,13 +267,45 @@ fr_send_artifacts() {
     fr_proto "AF ${_line%%  *} ${_file#./}"
   done < "$JOB_DIR/meta/artifact-hashes"
   _bytes=$(fr_archive_size "$JOB_DIR") || return 1
+  # The upload and command groups have stopped, and the archive owns the
+  # report bytes. Overlap deletion of only the disposable source with the
+  # return. The cleanup child inherits our admission guard and is joined
+  # before RELEASED, even when the controller disconnects or rejects output.
+  if [ "$FINALIZER_FAILED" = 0 ]; then
+    rm -rf -- "$JOB_DIR/src" </dev/null >/dev/null 3>&- 4>&- &
+    SOURCE_CLEANUP_PID=$!
+  fi
   fr_proto "ARTIFACTS $_bytes"
   fr_archive_stream "$JOB_DIR" >&3 || return 1
   if fr_wait_for_ack; then
-    rm -f "$JOB_DIR/artifacts.pending"
+    if ! rm -f "$JOB_DIR/artifacts.pending"; then
+      fr_proto "NOTE artifacts retained for verified recovery: $JOB_DIR"
+      return 1
+    fi
+    if [ "$FINALIZER_FAILED" = 1 ]; then
+      # Only the acknowledged archive is disposable. A failed finalizer
+      # keeps the checkout and owner so explicit recovery can retry safely.
+      if [ -f "$JOB_DIR/meta/large-scratch-owner.json" ]; then
+        python3 -B "$JOB_DIR/meta/large_scratch.py" cleanup "$JOB_DIR" || fr_proto 'NOTE acknowledged archive cleanup remains pending'
+      else
+        rm -f "$JOB_DIR/artifacts.tar" || fr_proto 'NOTE acknowledged archive cleanup remains pending'
+      fi
+    fi
   else
     fr_proto "NOTE artifacts retained for verified recovery: $JOB_DIR"
   fi
+}
+
+fr_wait_source_cleanup() {
+  [ -n "$SOURCE_CLEANUP_PID" ] || return 0
+  while :; do
+    wait "$SOURCE_CLEANUP_PID"
+    _cleanup_status=$?
+    # Bash wait can return early when a trapped SSH signal arrives. Wait
+    # again while the exact child is alive instead of releasing admission.
+    if [ "$_cleanup_status" -gt 128 ] && kill -0 "$SOURCE_CLEANUP_PID" 2>/dev/null; then continue; fi
+    return "$_cleanup_status"
+  done
 }
 
 # Ends the session: artifacts (finished jobs only), cleanup, lock release.
@@ -284,15 +316,22 @@ fr_finish() {
   FINALIZER_FAILED=0
   CLEANUP_FAILED=0
   CAPTURE_FAILED=0
-  if [ "$STUCK" = 0 ] && ! fr_run_finalizer "$JOB_DIR"; then
-    FINALIZER_FAILED=1
-    fr_proto 'FINALIZER-FAILED'
+  SOURCE_CLEANUP_PID=''
+  if [ "$STUCK" = 0 ]; then
+    if [ -f "$JOB_DIR/job-started" ] && [ -f "$JOB_DIR/meta/finalizer.sh" ]; then fr_proto 'FINALIZING'; fi
+    if ! fr_run_finalizer "$JOB_DIR"; then
+      FINALIZER_FAILED=1
+      fr_proto 'FINALIZER-FAILED'
+    fi
   fi
   fr_write_result
   fr_proto "RESULT reason=$REASON exit_code=$EXIT_CODE started=$JOB_STARTED ended=$JOB_ENDED stragglers=$STRAGGLERS stuck=$STUCK resource_samples=$RESOURCE_SAMPLES peak_rss_kib=$RESOURCE_PEAK_RSS_KIB peak_process_cpu_percent=$RESOURCE_PEAK_CPU_PERCENT"
-  if [ -n "$JOB_STARTED" ] && [ "$STUCK" = 0 ] && [ "$FINALIZER_FAILED" = 0 ]; then
-    fr_send_artifacts
+  if [ -n "$JOB_STARTED" ] && [ "$STUCK" = 0 ]; then
+    if [ "$FINALIZER_FAILED" = 0 ] || { [ "$(fr_kv_get "$JOB_DIR/finalizer.result" stuck)" = 0 ] && ! fr_guard_busy "$JOB_DIR/finalizer.guard"; }; then
+      fr_send_artifacts
+    fi
   fi
+  fr_wait_source_cleanup || CLEANUP_FAILED=1
   rm -f "$JOB_DIR/stdout.fifo" "$JOB_DIR/stderr.fifo"
   if [ "$CAPTURE_FAILED" = 1 ]; then
     CLEANUP_FAILED=1

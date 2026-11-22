@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 import { FleetError, usageError } from '../errors.ts';
 import { findMachine, type Machine, type MachinesRegistry } from '../schema/machines.ts';
 import type { Transport } from '../transport/transport.ts';
-import { evaluatePreflight, type PreflightReport } from './preflight.ts';
+import { evaluatePreflight, memoryHeadroomBytes, type PreflightReport } from './preflight.ts';
 import { fetchPreflight } from './remoteChecks.ts';
 import { getProfile, runProfile, type RunRequest, type RunResult } from './runJob.ts';
 import { reportDiskSpaceProblem } from './diskSpace.ts';
@@ -67,22 +67,20 @@ export interface OrderedRunRequest extends Omit<RunRequest, 'machine' | 'transpo
   readonly beforePreflight?: (machine: Machine) => Promise<void>;
   /** Only unpinned requests opt into ranking; explicit lists retain their order. */
   readonly automatic?: boolean;
-  /** Read synchronously at selection time, so other clients' new leases count. */
+  /** Include the coordinator's latest claims in diagnostics for the chosen worker. */
   readonly selectionUsage?: (machine: Machine, report: PreflightReport) => number;
 }
 
-/** Compare current pressure, proportional load and memory before the saved preference. */
-export function compareWorkerLoad(
-  left: { readonly report: PreflightReport; readonly used: number; readonly machine: Machine },
+/** Compare memory pressure and headroom before the saved worker preference. */
+export function compareWorkerMemory(
+  left: { readonly report: PreflightReport; readonly machine: Machine },
   right: typeof left,
 ): number {
-  const score = ({ report, used, machine }: typeof left): number[] => [
+  const score = ({ report, machine }: typeof left): number[] => [
     report.memPressureLevel === undefined ? 1 : report.memPressureLevel <= 1 ? 0 : report.memPressureLevel,
-    Math.max(report.cpuCount && report.loadAverage?.[0] !== undefined ? report.loadAverage[0] / report.cpuCount : 1,
-      used / machine.limits.maxConcurrentJobs),
+    -(memoryHeadroomBytes(report, machine) ?? 0),
     -(report.memAvailableBytes ?? 0),
-    -(report.diskFreeBytes ?? 0),
-  ]; // Decision: "healthiest suitable worker first" means a normal-pressure Mini can outrank a busy preferred M1. Stable sorting leaves the controller preference as the final tie-breaker; explicit pins/lists never use this comparison. (Codex task: 01a19457-3fdb-7362-895c-fdb317c3aa4f)
+  ]; // "CPU load shouldn't determine it." CPU and slot use are reported separately. Stable sorting preserves the saved preference when memory scores tie.
   const a = score(left), b = score(right);
   for (let index = 0; index < a.length; index += 1) {
     const difference = (a[index] ?? 0) - (b[index] ?? 0);
@@ -115,9 +113,7 @@ export async function runOnOrderedMachines(request: OrderedRunRequest): Promise<
     if (request.automatic) remaining.sort((a, b) => {
       const left = prepared.get(a.id), right = prepared.get(b.id);
       if (!left || !right) return left ? -1 : right ? 1 : 0;
-      const used = (machine: Machine, report: PreflightReport): number => request.selectionUsage?.(machine, report)
-        ?? (report.sharedLocks ?? []).filter(lock => lock.state !== 'free').length;
-      return compareWorkerLoad({ machine: a, report: left.report, used: used(a, left.report) }, { machine: b, report: right.report, used: used(b, right.report) });
+      return compareWorkerMemory({ machine: a, report: left.report }, { machine: b, report: right.report });
     }); // No await between this live reservation-aware ranking and runOne's synchronous lease insertion.
     const machine = remaining.shift();
     if (!machine) break;

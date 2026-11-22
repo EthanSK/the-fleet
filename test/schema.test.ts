@@ -77,7 +77,7 @@ test('sync patterns are validated', () => {
 
 test('finalizers require bounded finite time and refuse agent sessions', () => {
   rejects(manifestWith({ finalizer: { argv: ['echo', 'cleanup'], timeoutSeconds: 0 } }), /timeoutSeconds/);
-  rejects(manifestWith({ finalizer: { argv: ['echo', 'cleanup'], timeoutSeconds: 61 } }), /timeoutSeconds/);
+  rejects(manifestWith({ finalizer: { argv: ['echo', 'cleanup'], timeoutSeconds: 301 } }), /timeoutSeconds/);
   rejects(manifestWith({ finalizer: { argv: ['codex'], timeoutSeconds: 10 } }), /agent session/);
 });
 

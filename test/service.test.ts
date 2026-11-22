@@ -350,3 +350,40 @@ test('restart recovery clears managed ownership only after a conclusive idle pro
     assert.ok(await restarted.reserve('new-app', 'tests', ['mini']));
   } finally { f.cleanup(); }
 });
+
+test('managed recovery probes each worker once and releases only proven jobs alongside live work', async () => {
+  const f = fixture(8);
+  const job = (machineId: string, name: string, kind = 'managed', fingerprint = machineId) => ({
+    id: name, jobId: name, machineId, fingerprint, owner: 'fixture', label: name, kind,
+    createdAt: new Date().toISOString(), expiresAt: null, tokenHash: 'a'.repeat(64), state: 'unverified',
+  });
+  const original = [
+    job('mini', 'finished'), job('mini', 'stale'), job('mini', 'unseen'), job('mini', 'busy'),
+    job('mini', 'wrong-host', 'managed', 'old-host'), job('mini', 'external', 'external'),
+    job('alias', 'absent-on-idle-worker'), job('alias', 'other-stale'),
+  ];
+  const observations: string[] = [];
+  const gates: (() => void)[] = [];
+  try {
+    writeFileSync(join(f.paths.home, 'reservations.json'), JSON.stringify(original));
+    const coordinator = new Coordinator(f.paths, { ...f.dependencies, inspect: async (machine, candidates) => {
+      observations.push(machine.id);
+      assert.ok(candidates?.length);
+      await new Promise<void>((ready) => {
+        gates.push(ready);
+        if (gates.length === 2) for (const resolve of gates) resolve();
+      });
+      const baseline = (await f.dependencies.inspect(machine)).report!;
+      const report: PreflightReport = machine.id === 'mini'
+        ? { ...baseline, fingerprint: machine.id, admissionFree: false, releasedJobs: ['finished', 'stale', 'busy', 'external', 'wrong-host'],
+          sharedLocks: [{ state: 'stale', jobId: 'stale', label: 'pending archive' }, { state: 'busy', jobId: 'busy', label: 'running', orphaned: false }] }
+        : { ...baseline, fingerprint: machine.id, sharedLocks: [{ state: 'stale', jobId: 'other-stale', label: 'pending archive' }] };
+      return { machine, report, observedAt: new Date().toISOString() };
+    } });
+    const released = await coordinator.recoverManaged();
+    assert.deepEqual(observations, ['mini', 'alias']);
+    assert.deepEqual(released, ['finished', 'absent-on-idle-worker']);
+    assert.deepEqual(JSON.parse(readFileSync(join(f.paths.home, 'reservations.json'), 'utf8')).map((lease: { id: string }) => lease.id),
+      original.map(lease => lease.id).filter(id => !released.includes(id)));
+  } finally { f.cleanup(); }
+});

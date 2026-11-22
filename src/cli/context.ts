@@ -20,6 +20,7 @@ export interface CliContext {
   /** The Fleet coordinator adds one shared admission gate across local clients. */
   readonly runOne?: (request: RunRequest) => Promise<RunResult | null>;
   readonly beforePreflight?: (machine: Machine) => Promise<void>;
+  readonly isManagedRunActive?: (machine: Machine, jobId: string) => boolean;
   readonly selectionUsage?: OrderedRunRequest['selectionUsage'];
   readonly onDiskSpaceProblem?: DiskSpaceProblemHandler;
 }

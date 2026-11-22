@@ -50,12 +50,13 @@ export function supervisorCommand(machine: Machine, args: SupervisorArguments): 
   ]);
 }
 
-export function preflightCommand(machine: Machine, extraPathPrepend: readonly string[], tools: readonly string[]): string {
+export function preflightCommand(machine: Machine, extraPathPrepend: readonly string[], tools: readonly string[], recoveryJobs: readonly string[] = []): string {
   return inlineBashCommand(loadScript('preflight.sh'), 'fleet-runner-preflight', [
     remotePathWord(machine.remoteRoot),
     shellQuote([...extraPathPrepend, ...machine.pathPrepend].join(':')),
     shellQuote(tools.join(',')),
     shellQuote(machine.limits.heavyProcessNames.join(',')),
+    shellQuote(recoveryJobs.join(',')),
   ]);
 }
 

@@ -17,7 +17,7 @@ import { PortForwarding, type ForwardingOptions, type PublicForwarding } from '.
 import { fetchPreflight, fetchStatus, runControl, type RemoteStatus, type ControlResult } from '../run/remoteChecks.ts';
 import { evaluatePreflight, type PreflightReport } from '../run/preflight.ts';
 import { assessMemory } from '../run/memoryAssessment.ts';
-import { compareWorkerLoad, defaultMachineNames, localMachineFingerprint } from '../run/orderedMachines.ts';
+import { compareWorkerMemory, defaultMachineNames, localMachineFingerprint } from '../run/orderedMachines.ts';
 import { getProfile, makeJobId, runProfile, type RunRequest, type RunResult } from '../run/runJob.ts';
 import { e2eLimit, claimsConflict, parseClaim, profileClaim, type CapacityClaim } from '../run/capacity.ts';
 import { reportDiskSpaceProblem, type DiskSpaceProblemHandler } from '../run/diskSpace.ts';
@@ -50,7 +50,7 @@ export type ReservationConnection = AgentBridgeRoute & Pick<Machine, 'remoteRoot
 export interface CoordinatorDependencies {
   readonly machines: () => readonly Machine[];
   readonly preferredMachine?: () => string | undefined;
-  readonly inspect: (machine: Machine) => Promise<WorkerObservation>;
+  readonly inspect: (machine: Machine, recoveryJobs?: readonly string[]) => Promise<WorkerObservation>;
   readonly localFingerprint: () => Promise<string>;
   readonly execute: (request: RunRequest) => Promise<RunResult>;
   readonly now: () => number;
@@ -66,12 +66,14 @@ export function productionDependencies(paths: StatePaths): CoordinatorDependenci
   return {
     machines: () => loadMachines(paths).machines,
     preferredMachine: () => defaultMachineNames(loadMachines(paths))[0],
-    inspect: async (machine) => {
+    inspect: async (machine, recoveryJobs) => {
       const observedAt = new Date().toISOString();
       try {
         const transport = SshTransport.forMachine(machine);
-        const report = await fetchPreflight(transport, machine, [], []);
-        const recent = await fetchStatus(transport, machine).catch(() => undefined);
+        const report = await fetchPreflight(transport, machine, [], [], recoveryJobs);
+        // Recovery only needs ownership evidence. Inventorying the whole jobs
+        // and caches directories can be slow on a worker keeping large outputs.
+        const recent = recoveryJobs === undefined ? await fetchStatus(transport, machine).catch(() => undefined) : undefined;
         return { machine, observedAt, report, ...(recent ? { recent } : {}) };
       } catch (error) {
         return { machine, observedAt, error: error instanceof Error ? error.message : 'Worker inspection failed' };
@@ -168,7 +170,7 @@ export class Coordinator {
     return held.length + (report?.sharedLocks ?? []).filter((lock) => lock.state !== 'free' && !knownJobs.has(lock.jobId)).length;
   }
 
-  /** Counts both local leases and unmatched remote owners for live worker ranking. */
+  /** Counts both local leases and unmatched remote owners for placement diagnostics. */
   selectionUsage(machine: Machine, report: PreflightReport): number {
     return report.fingerprint ? this.capacityUsed(report.fingerprint, report) : this.reservationsFor(machine).length;
   }
@@ -196,11 +198,11 @@ export class Coordinator {
     return this.remoteLocksFree(report) && !report.heavy.length;
   }
 
-  private inspect(machine: Machine, fresh: boolean): Promise<WorkerObservation> {
+  private inspect(machine: Machine, fresh: boolean, recoveryJobs?: readonly string[]): Promise<WorkerObservation> {
     const current = this.observations.get(machine.id);
     if (!fresh && current && this.dependencies.now() - current.at < 5000) return current.value;
-    const value = this.dependencies.inspect(machine);
-    this.observations.set(machine.id, { at: this.dependencies.now(), value });
+    const value = this.dependencies.inspect(machine, recoveryJobs);
+    if (recoveryJobs === undefined) this.observations.set(machine.id, { at: this.dependencies.now(), value });
     void value.then((observation) => {
       if (observation.report?.fingerprint) this.fingerprints.set(machine.id, observation.report.fingerprint);
     }, () => {});
@@ -309,7 +311,8 @@ export class Coordinator {
     const machine = this.dependencies.machines().find((candidate) => candidate.id === machineId);
     if (!machine) throw new FleetError('usage', `Unknown worker: ${machineId}`);
     const local = await this.dependencies.localFingerprint();
-    const observation = await this.inspect(machine, true);
+    const candidates = this.managedRecoveryCandidates(machine);
+    const observation = await this.inspect(machine, true, candidates.length ? this.recoveryJobIds(candidates) : undefined);
     const report = observation.report;
     let cleanup: MaintenanceResult['cleanup'] = { status: 'not-needed' };
     const save = (): MaintenanceResult => {
@@ -323,6 +326,7 @@ export class Coordinator {
     if (!report?.complete || !report.fingerprint || report.fingerprint === local || !this.destinationIsCurrent(machine)) {
       cleanup = { status: 'unverified' }; return save();
     }
+    this.reconcileManaged(machine, candidates, report);
     if (this.held(report.fingerprint) || this.reservationsFor(machine).length) {
       cleanup = { status: 'reserved' }; return save();
     }
@@ -392,8 +396,7 @@ export class Coordinator {
       if (machineNames === undefined) selected.sort((a, b) => {
         const left = prepared.get(a.id)?.report, right = prepared.get(b.id)?.report;
         if (!left || !right) return left ? -1 : right ? 1 : 0;
-        return compareWorkerLoad({ machine: a, report: left, used: this.selectionUsage(a, left) },
-          { machine: b, report: right, used: this.selectionUsage(b, right) });
+        return compareWorkerMemory({ machine: a, report: left }, { machine: b, report: right });
       });
       const machine = selected.shift();
       if (!machine) break;
@@ -663,22 +666,57 @@ export class Coordinator {
     }
   }
 
+  private managedRecoveryCandidates(machine: Machine): Reservation[] {
+    return [...this.reservations.values()].filter((lease) =>
+      lease.kind === 'managed' && lease.state === 'unverified' && lease.machineId === machine.id);
+  }
+
+  private recoveryJobIds(candidates: readonly Reservation[]): string[] {
+    return [...new Set(candidates.flatMap((lease) => lease.jobId ? [lease.jobId] : []))];
+  }
+
+  private reconcileManaged(machine: Machine, candidates: readonly Reservation[], report: PreflightReport): string[] {
+    if (!report.complete || !report.fingerprint || !this.destinationIsCurrent(machine)) return [];
+    const locks = [report.lock, ...(report.sharedLocks ?? [])];
+    const idle = this.remoteIdle(report);
+    // An old claim may predate a worker folder or its folder may have been
+    // pruned. Infer absence only when the kernel guard is free and the lock
+    // listing has no running or unknown owner. Keep a matching stale lock:
+    // it might still own a finalizer or the last copy of the job's artifacts.
+    const absenceIsConclusive = report.admissionFree === true &&
+      locks.every((lock) => lock.state === 'free' || (lock.state === 'stale' && lock.jobId !== '-'));
+    const released = candidates.filter((lease) => {
+      if (lease.fingerprint !== report.fingerprint || this.reservations.get(lease.id) !== lease || lease.state !== 'unverified') return false;
+      if (idle) return true;
+      const jobId = lease.jobId;
+      return Boolean(jobId && /^[a-z0-9][a-z0-9-]*$/.test(jobId) &&
+        locks.every((lock) => lock.state === 'free' || (lock.jobId !== '-' && lock.jobId !== jobId)) &&
+        (absenceIsConclusive || report.releasedJobs?.includes(jobId)));
+    });
+    if (!released.length) return [];
+    for (const lease of released) this.reservations.delete(lease.id);
+    try {
+      this.persist();
+    } catch (error) {
+      for (const lease of released) this.reservations.set(lease.id, lease);
+      throw error;
+    }
+    return released.map((lease) => lease.id);
+  }
+
   async recoverManaged(machineId?: string): Promise<string[]> {
-    if (machineId !== undefined && !this.dependencies.machines().some((machine) => machine.id === machineId)) {
+    const workers = this.dependencies.machines().filter((machine) => machineId === undefined || machine.id === machineId);
+    if (machineId !== undefined && !workers.length) {
       throw new FleetError('usage', `Unknown worker: ${machineId}`);
     }
-    const released: string[] = [];
-    for (const lease of [...this.reservations.values()]) {
-      if (lease.kind !== 'managed' || lease.state !== 'unverified') continue;
-      if (machineId !== undefined && lease.machineId !== machineId) continue;
-      const machine = this.dependencies.machines().find((m) => m.id === lease.machineId);
-      if (!machine) continue;
-      const { report } = await this.inspect(machine, true);
-      if (report?.complete && report.fingerprint === lease.fingerprint && this.remoteIdle(report)) {
-        this.reservations.delete(lease.id); released.push(lease.id);
-      }
-    }
-    this.persist();
-    return released;
+    const local = await this.dependencies.localFingerprint();
+    // Probe once per worker, in parallel. A 120-second client request
+    // previously queued two SSH commands in series for each stale claim.
+    return (await Promise.all(workers.map(async (machine) => {
+      const candidates = this.managedRecoveryCandidates(machine);
+      if (!candidates.length) return [];
+      const { report } = await this.inspect(machine, true, this.recoveryJobIds(candidates));
+      return report && report.fingerprint !== local ? this.reconcileManaged(machine, candidates, report) : [];
+    }))).flat();
   }
 }

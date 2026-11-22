@@ -1,5 +1,6 @@
 // Job commands: run, status, cancel, lock clear, results.
 
+import { join } from 'node:path';
 import { FleetError, usageError } from '../errors.ts';
 import { loadMachines, loadProject, resolveSourceRoot, selectMachine } from '../registry.ts';
 import { describeLock, formatDuration } from '../run/preflight.ts';
@@ -9,7 +10,8 @@ import { runProfile } from '../run/runJob.ts';
 import { expectPositionals, parseArgs, single } from './args.ts';
 import { print, status, type CliContext } from './context.ts';
 import { printPlan } from './projectCommands.ts';
-import { recoverArtifacts } from '../run/recoverArtifacts.ts';
+import { NoRetainedArchiveError, recoverArtifacts } from '../run/recoverArtifacts.ts';
+import { locateRunReceipt } from '../service/catalog.ts';
 import { defaultMachineNames, orderedMachines, runOnOrderedMachines } from '../run/orderedMachines.ts';
 import { reportDiskSpaceProblem } from '../run/diskSpace.ts';
 
@@ -17,8 +19,19 @@ export async function recoverCommand(context: CliContext, argv: readonly string[
   const args = parseArgs(argv, { values: ['machine'] });
   const [jobId = ''] = expectPositionals(args, ['job-id'], 'fleet-runner recover <job-id> [--machine <name>]');
   const machine = selectMachine(loadMachines(context.paths), single(args, 'machine'), undefined);
-  const path = await recoverArtifacts(context.paths, context.transportFor(machine), machine, jobId);
-  print(context, `Recovered verified artifacts: ${path}`);
+  if (context.isManagedRunActive?.(machine, jobId)) {
+    throw new FleetError('machineBusy', `${jobId} is still in progress on ${machine.id}. Wait for Fleet to finish collecting its result.`);
+  }
+  try {
+    const path = await recoverArtifacts(context.paths, context.transportFor(machine), machine, jobId, (line) => status(context, line));
+    print(context, `Recovered verified artifacts: ${path}`);
+  } catch (error) {
+    if (!(error instanceof NoRetainedArchiveError)) throw error;
+    const { receipt, directory } = await locateRunReceipt(context.paths, jobId);
+    if (receipt?.jobId !== jobId || receipt.machine?.id !== machine.id || receipt.remote?.lockReleased !== true
+      || !receipt.artifacts?.length || receipt.missingArtifacts?.length !== 0) throw error;
+    print(context, `Fleet already returned verified output for ${jobId}. See ${join(directory, 'receipt.json')}.`);
+  }
   return 0;
 }
 

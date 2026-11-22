@@ -2,7 +2,7 @@
 # --preflight`, `run` and `doctor`. It never writes, installs, downloads or
 # starts builds; it only reads system state and prints key=value lines.
 #
-# Arguments: root path_prepend(colon-separated, may be empty) tools(csv) heavy_names(csv)
+# Arguments: root path_prepend(colon-separated, may be empty) tools(csv) heavy_names(csv) recovery_job_ids(csv)
 #
 # Limits worth knowing (also reported by doctor):
 # - "Available memory" on macOS is free + inactive + speculative pages from
@@ -16,6 +16,7 @@ FR_ROOT=$1
 PATH_PREPEND=$2
 TOOLS=$3
 HEAVY=$4
+RECOVERY_JOBS=${5:-}
 
 fr_check_root "$FR_ROOT"
 
@@ -55,14 +56,26 @@ case "$(uname -s)" in
       END { gsub(/\./, "", free); gsub(/\./, "", inactive); gsub(/\./, "", speculative);
             if (size > 0) printf "mem_available_bytes=%.0f\n", (free + inactive + speculative) * size }'
     printf 'mem_pressure_level=%s\n' "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
-    printf 'swap_used_mb=%s\n' "$(sysctl -n vm.swapusage 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "used") {v = $(i + 2); sub(/M$/, "", v); print v}}')"
+    LC_ALL=C sysctl -n vm.swapusage 2>/dev/null | awk '{
+      for (i = 1; i + 2 <= NF; i++) {
+        value = $(i + 2)
+        if (value !~ /^[0-9]+([.][0-9]+)?M$/) continue
+        if ($i == "used") printf "swap_used_mb=%.2f\n", value + 0
+        if ($i == "free") printf "swap_free_bytes=%.0f\n", value * 1048576
+      }
+    }'
+    df -Pk /private/var/vm 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ {printf "swap_disk_free_bytes=%.0f\n", $4 * 1024}'
     _console=$(stat -f %Su /dev/console 2>/dev/null)
     ;;
   *)
     printf 'model=%s\n' "$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null)"
     printf 'cpu_brand=%s\n' "$(awk -F': *' '/^model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null)"
     printf 'os_version=%s\n' "$( (. /etc/os-release 2>/dev/null && printf '%s' "$PRETTY_NAME") )"
-    awk '/^MemTotal:/ {printf "mem_total_bytes=%.0f\n", $2 * 1024} /^MemAvailable:/ {printf "mem_available_bytes=%.0f\n", $2 * 1024}' /proc/meminfo 2>/dev/null
+    awk '
+      /^MemTotal:/ {printf "mem_total_bytes=%.0f\n", $2 * 1024}
+      /^MemAvailable:/ {printf "mem_available_bytes=%.0f\n", $2 * 1024}
+      /^SwapFree:/ {printf "swap_free_bytes=%.0f\n", $2 * 1024}
+    ' /proc/meminfo 2>/dev/null
     _console=''
     ;;
 esac
@@ -134,4 +147,30 @@ printf 'lock=%s\n' "$(fr_lock_state)"
 fr_shared_states
 printf 'pending_artifacts=%s\n' "$(fr_pending_archive_count)"
 if fr_guard_busy "$FR_ROOT/locks/admission"; then printf 'admission_free=0\n'; else printf 'admission_free=1\n'; fi
+if [ -n "$RECOVERY_JOBS" ] && [ ! -L "$FR_ROOT" ] && [ ! -L "$FR_ROOT/jobs" ] &&
+   [ ! -L "$FR_ROOT/locks" ] && [ ! -L "$FR_ROOT/locks/shared" ] && [ ! -L "$FR_ROOT/locks/heavy" ]; then
+  IFS=, read -r -a _recovery_ids <<< "$RECOVERY_JOBS"
+  for _id in "${_recovery_ids[@]}"; do
+    fr_is_job_id "$_id" || continue
+    _job_dir="$FR_ROOT/jobs/$_id"
+    _job_lock="$FR_ROOT/locks/shared/$_id"
+    # A result alone is written before finalization. Check that the runner
+    # cleaned this exact job and released its lock. Keep any retained archive.
+    [ -d "$_job_dir" ] && [ ! -L "$_job_dir" ] && [ ! -L "$_job_dir/meta" ] || continue
+    [ -f "$_job_dir/.fleet-job" ] && [ ! -L "$_job_dir/.fleet-job" ] &&
+      [ -f "$_job_dir/result" ] && [ ! -L "$_job_dir/result" ] || continue
+    [ "$(fr_kv_get "$_job_dir/result" job_id)" = "$_id" ] &&
+      fr_is_uint "$(fr_kv_get "$_job_dir/result" ended)" &&
+      [ "$(fr_kv_get "$_job_dir/result" stuck)" = 0 ] || continue
+    [ ! -e "$_job_dir/src" ] && [ ! -L "$_job_dir/src" ] && [ ! -e "$_job_dir/job-started" ] || continue
+    [ ! -f "$_job_dir/meta/finalizer.sh" ] ||
+      { [ -f "$_job_dir/finalizer.done" ] && [ ! -L "$_job_dir/finalizer.done" ]; } || continue
+    fr_upload_busy "$_job_dir" && continue
+    fr_guard_busy "$_job_dir/finalizer.guard" && continue
+    fr_guard_busy "$_job_dir/archive.guard" && continue
+    [ ! -e "$_job_lock" ] && [ ! -L "$_job_lock" ] || continue
+    [ "$(fr_kv_get "$FR_ROOT/locks/heavy/owner" job_id)" != "$_id" ] || continue
+    printf 'released_job=%s\n' "$_id"
+  done
+fi
 printf 'done=1\n'

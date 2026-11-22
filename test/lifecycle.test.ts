@@ -1,7 +1,7 @@
 // Exercise the exact remote supervisor in isolated local homes, including
 // process cleanup and contention. Live Mini qualification is separate.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Transform, Writable } from 'node:stream';
@@ -47,6 +47,125 @@ test('real supervisor returns verified artifacts, stderr and cleanup', { timeout
     assert.equal(existsSync(join(run.receiptPath, '..', 'artifacts.tar.part')), false, 'verified normal return must remove its redundant transfer archive');
     assert.equal(existsSync(join(env.remoteRoot, 'locks', 'heavy')), false);
     assert.equal(existsSync(join(env.remoteRoot, 'jobs', run.receipt.jobId, 'src')), false);
+  } finally { env.cleanup(); }
+});
+
+test('source cleanup overlaps output verification but retains admission until it finishes', { timeout: 30000 }, async () => {
+  const { env, request } = setup('echo report > result.txt; echo tests 1', { artifacts: ['result.txt'] });
+  const started = join(env.root, 'cleanup-started');
+  const release = join(env.root, 'allow-cleanup');
+  const statuses: string[] = [];
+  const commandFragment = 'rm -rf -- "$JOB_DIR/src" </dev/null';
+  const controlled = `bash -c ${shellQuote('echo started > "$1"; while [ ! -f "$2" ]; do sleep 0.1; done; exec /bin/rm -rf -- "$3"')} cleanup ${shellQuote(started)} ${shellQuote(release)} "$JOB_DIR/src" </dev/null`;
+  const transport = {
+    description: env.transport.description,
+    isConnectionFailure: () => false,
+    start: (command: string) => env.transport.start(command.replace(shellQuote(commandFragment).slice(1, -1), shellQuote(controlled).slice(1, -1))),
+  };
+  const pending = runProfile({ ...request, transport, io: { ...request.io, status: (line) => statuses.push(line) } });
+  try {
+    assert.equal(await waitUntil(() => existsSync(started) && statuses.some((line) => line.startsWith('Output verified.')), 12000), true);
+    assert.equal((await runControl(env.transport, testMachine(), 'clear-stale')).result, 'busy');
+    writeFileSync(release, '');
+    const run = await pending;
+    assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.equal(readFileSync(join(run.receiptPath, '..', 'artifacts/result.txt'), 'utf8'), 'report\n');
+    assert.equal(existsSync(join(env.remoteRoot, 'jobs', run.receipt.jobId, 'src')), false);
+  } finally {
+    writeFileSync(release, '');
+    await pending.catch(() => {});
+    env.cleanup();
+  }
+});
+
+test('cached setup reuses installed bytes without exposing them to job writes', { timeout: 30000, skip: process.platform !== 'darwin' }, async () => {
+  const { env, request } = setup('test ! -e .git && cmp lock.txt node_modules/alias && echo mutated > node_modules/value && echo tests 1', {
+    extraInputs: ['lock.txt'],
+    cache: { name: 'setup-fixture', maxGiB: 0.1, concurrent: true, setup: {
+      directory: 'node_modules', inputs: ['lock.txt'], runtime: [['/bin/sh', '-c', 'echo synthetic-runtime']],
+      keyEnv: ['SETUP_MODE'], steps: [['/bin/sh', '-c', 'set -e; mkdir node_modules; cp lock.txt node_modules/value; ln -s value node_modules/alias; echo install >> "$FLEET_RUNNER_CACHE_DIR/installs"']],
+    } },
+  });
+  const input = join(request.sourceRoot, 'lock.txt');
+  const installs = join(env.remoteRoot, 'cache/setup-fixture/installs');
+  request.machine = testMachine({ env: { JOB_CACHE: '@JOB_DIR@/cache' } });
+  try {
+    writeFileSync(input, 'original');
+    for (let index = 0; index < 2; index++) {
+      const run = await runProfile(request);
+      assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+      assert.equal(existsSync(join(env.remoteRoot, 'jobs', run.receipt.jobId, 'src')), false);
+    }
+    assert.equal(readFileSync(installs, 'utf8'), 'install\n');
+    writeFileSync(input, 'changed lockfile');
+    const changed = await runProfile(request);
+    assert.equal(changed.receipt.outcome, 'passed', JSON.stringify(changed.receipt));
+    const differentEnvironment = await runProfile({ ...request, machine: testMachine({ env: { ...request.machine.env, SETUP_MODE: 'new' } }) });
+    assert.equal(differentEnvironment.receipt.outcome, 'passed', JSON.stringify(differentEnvironment.receipt));
+    assert.equal(readFileSync(installs, 'utf8'), 'install\ninstall\ninstall\n');
+  } finally { env.cleanup(); }
+});
+
+test('cached setup can exclude declared job-only variables from both the key and setup commands', { timeout: 30000, skip: process.platform !== 'darwin' }, async () => {
+  const { env, request } = setup('test -n "$RUN_SELECTION" && cmp lock.txt installed/value && echo tests 1', {
+    extraInputs: ['lock.txt'],
+    env: { INSTALL_MODE: 'development' },
+    cache: { name: 'scoped-setup', maxGiB: 0.1, setup: {
+      directory: 'installed', inputs: ['lock.txt'], declaredEnv: ['INSTALL_MODE'],
+      runtime: [['/bin/sh', '-c', 'test -z "${RUN_SELECTION+x}" && test "$INSTALL_MODE" = development && echo fixture-runtime']],
+      steps: [['/bin/sh', '-c', 'set -e; test -z "${RUN_SELECTION+x}"; test "$INSTALL_MODE" = development; mkdir installed; cp lock.txt installed/value; echo install >> "$FLEET_RUNNER_CACHE_DIR/installs"']],
+    } },
+  });
+  try {
+    writeFileSync(join(request.sourceRoot, 'lock.txt'), 'same installation inputs');
+    for (const selection of ['first scenario', 'edited source plus different scenario']) {
+      writeFileSync(join(request.sourceRoot, 'run.sh'), `# ${selection}\ntest -n "$RUN_SELECTION" && cmp lock.txt installed/value && echo tests 1`);
+      const run = await runProfile({ ...request, machine: testMachine({ env: { RUN_SELECTION: selection } }) });
+      assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    }
+    assert.equal(readFileSync(join(env.remoteRoot, 'cache/scoped-setup/installs'), 'utf8'), 'install\n');
+  } finally { env.cleanup(); }
+});
+
+test('setup retention counts the allocated size of the actual private copy', { skip: process.platform !== 'darwin' }, () => {
+  const env = testEnvironment();
+  try {
+    const job = join(env.remoteRoot, 'jobs', 'setup-allocation');
+    const source = join(job, 'src');
+    const cache = join(env.remoteRoot, 'cache', 'setup-allocation');
+    mkdirSync(cache, { recursive: true });
+    mkdirSync(join(env.remoteRoot, 'locks'), { recursive: true });
+    writeFiles(job, { 'src/lock.txt': '', 'meta/cache-setup.json': JSON.stringify({
+      directory: 'installed', inputs: ['lock.txt'], runtime: [['/bin/sh', '-c', 'echo fixture']],
+      environment: [], declaredEnvironment: '', maxKiB: 64,
+    }), 'meta/cache-setup.sh': 'mkdir installed; for i in {1..128}; do printf x > "installed/tiny-$i"; done' });
+    execFileSync('python3', ['-B', new URL('../remote/cache_setup.py', import.meta.url).pathname], {
+      cwd: source, env: { ...process.env, FLEET_RUNNER_JOB_DIR: job, FLEET_RUNNER_SRC_DIR: source, FLEET_RUNNER_CACHE_DIR: cache },
+    });
+    assert.equal(readFileSync(join(source, 'installed/tiny-128'), 'utf8'), 'x');
+    assert.deepEqual(readdirSync(join(cache, '.fleet-runner-setup')), []);
+    assert.equal(existsSync(join(job, 'setup-cache.pending')), false);
+  } finally { env.cleanup(); }
+});
+
+test('runtime probe failures report the tool name and status without returning probe data', { timeout: 30000, skip: process.platform !== 'darwin' }, async () => {
+  const { env, request } = setup('echo tests 1', {
+    extraInputs: ['lock.txt'],
+    cache: { name: 'setup-probe', maxGiB: 0.1, setup: {
+      directory: 'installed', inputs: ['lock.txt'],
+      runtime: [['/bin/sh', '-c', 'echo PRIVATE_SYNTHETIC_PROBE_OUTPUT; echo PRIVATE_SYNTHETIC_PROBE_ERROR >&2; exit 42', 'PRIVATE_SYNTHETIC_PROBE_ARG']],
+      steps: [['/bin/mkdir', 'installed']],
+    } },
+  });
+  try {
+    writeFileSync(join(request.sourceRoot, 'lock.txt'), 'lock');
+    const run = await runProfile(request);
+    assert.equal(run.receipt.outcome, 'failed');
+    assert.equal(run.receipt.remote.exitCode, 42);
+    assert.equal(run.receipt.remote.lockReleased, true);
+    assert.match(env.stderr.text, /runtime probe for sh failed \(exit status 42\)/);
+    assert.doesNotMatch(env.stderr.text + env.stdout.text, /PRIVATE_SYNTHETIC_PROBE_/);
   } finally { env.cleanup(); }
 });
 
@@ -351,10 +470,17 @@ for (const end of ['completed', 'failed', 'timeout', 'cancelled', 'disconnected'
     const transport = { description: env.transport.description, isConnectionFailure: () => false, start: (command: string) => {
       const p = env.transport.start(command); if (command.includes('fleet-runner-supervisor')) supervisor = p; return p;
     } };
+    let markRunning = () => {};
+    const running = new Promise<void>((resolve) => { markRunning = resolve; });
+    const stdout = new Writable({ write(chunk, _encoding, done) {
+      env.stdout.write(chunk);
+      if (env.stdout.text.includes('RUNNING')) markRunning();
+      done();
+    } });
     try {
-      const pending = runProfile({ ...request, transport });
+      const pending = runProfile({ ...request, transport, io: { ...request.io, stdout } });
       if (end === 'cancelled' || end === 'disconnected') {
-        assert.equal(await waitUntil(() => env.stdout.text.includes('RUNNING'), 10000), true);
+        await Promise.race([running, pending.then((run) => assert.fail(`Job ended before RUNNING: ${JSON.stringify(run.receipt)}`))]);
         if (end === 'cancelled') interrupts.trigger(); else supervisor?.stdin.end();
       }
       const run = await pending;
@@ -382,6 +508,23 @@ test('failed finalizer retains ownership and source; explicit stale recovery ret
     assert.equal((await runControl(env.transport, testMachine(), 'clear-stale')).result, 'cleared');
     assert.equal(existsSync(join(directory, 'finalizer.done')), true);
     assert.equal(existsSync(join(directory, 'src')), false);
+  } finally { env.cleanup(); }
+});
+
+test('a failed finalizer returns prepared artifacts without releasing its source or lock', { timeout: 30000 }, async () => {
+  const { env, request } = setup('echo tests 1', {
+    artifacts: ['report.txt'],
+    finalizer: { argv: ['bash', '-c', 'echo useful > report.txt; exit 7'], timeoutSeconds: 61 },
+  });
+  try {
+    const run = await runProfile(request);
+    const directory = join(env.remoteRoot, 'jobs', run.receipt.jobId);
+    assert.equal(run.receipt.outcome, 'error');
+    assert.equal(run.receipt.remote.lockReleased, false);
+    assert.equal(readFileSync(join(run.receiptPath, '..', 'artifacts/report.txt'), 'utf8'), 'useful\n');
+    assert.equal(readFileSync(join(directory, 'src/report.txt'), 'utf8'), 'useful\n');
+    assert.equal(existsSync(join(directory, 'artifacts.pending')), false);
+    assert.equal(existsSync(join(directory, 'artifacts.tar')), false);
   } finally { env.cleanup(); }
 });
 

@@ -2,11 +2,10 @@
 // from execution and command/env data, with exact files and bounded ownership.
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, promises as fs, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, realpathSync, promises as fs, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { loadProject, registerProject } from '../src/registry.ts';
 import { parseManifest } from '../src/schema/manifest.ts';
 import { Interrupts, runProfile } from '../src/run/runJob.ts';
@@ -32,8 +31,30 @@ function setup(command = 'echo tests 1', extra: Record<string, unknown> = {}) {
   const request = { paths: env.paths, project: loadProject(env.paths, 'rsync-fixture'), profileName: 'test', machine: testMachine(),
     transport, sourceRoot: source, extraArgs: [], ignoreHeavyProcesses: false, interrupts,
     io: { stdout: env.stdout, stderr: env.stderr, status: (_line: string) => {} } };
-  const owner = join(env.remoteRoot, 'cache/shared-fixture/.fleet-runner-sources/rsync-fixture');
+  const owner = baselineOwner(env.remoteRoot, source);
   return { env, request, transport, source, owner, tree: join(owner, 'tree'), interrupts };
+}
+
+function baselineOwner(remoteRoot: string, source: string): string {
+  const worktree = createHash('sha256').update(realpathSync(source)).digest('hex');
+  return join(remoteRoot, 'cache/shared-fixture/.fleet-runner-worktrees/rsync-fixture', worktree);
+}
+
+function setReceiverCacheLimit(fixture: ReturnType<typeof setup>, maxKiB: number): void {
+  // Exercise the actual receiver with a small allocated fixture. Profile
+  // validation's 0.1 GiB minimum still applies to normal client requests.
+  fixture.transport.beforeSync = () => {
+    const jobs = join(fixture.env.remoteRoot, 'jobs');
+    const job = readdirSync(jobs).find((name) => existsSync(join(jobs, name, 'meta/source-sync.json')));
+    assert.ok(job);
+    const config = join(jobs, job, 'meta/source-sync.json');
+    const metadata = JSON.parse(readFileSync(config, 'utf8')) as Record<string, unknown>;
+    writeFileSync(config, JSON.stringify({ ...metadata, cacheMaxKiB: maxKiB }));
+  };
+}
+
+function allocatedKiB(directory: string): number {
+  return Number(execFileSync('/usr/bin/du', ['-sk', directory], { encoding: 'utf8' }).split(/\s+/, 1)[0]);
 }
 
 test('rsync requires an explicit bounded cache', () => {
@@ -116,49 +137,40 @@ test('native sender caching preserves receiver compatibility', { timeout: 30000,
   } finally { fixture.env.cleanup(); }
 });
 
-test('concurrent source sync uses private scratch while a peer owns the retained source', { timeout: 30000 }, async () => {
-  const fixture = setup('echo tests 1', { cache: { name: 'shared-fixture', maxGiB: 0.1, concurrent: true } });
-  const sourceGuard = join(fixture.env.remoteRoot, 'locks', 'source-' + createHash('sha256').update('shared-fixture/rsync-fixture').digest('hex'));
-  writeFiles(fixture.owner, { '.fleet-source': 'rsync-fixture', 'tree/peer.txt': 'peer source stays unchanged' });
-  mkdirSync(join(fixture.env.remoteRoot, 'locks'), { recursive: true });
-  const holder = spawn('python3', ['-B', '-c',
-    'import fcntl,sys\nwith open(sys.argv[1],"a") as guard:\n fcntl.flock(guard,fcntl.LOCK_EX)\n print("held",flush=True)\n sys.stdin.read()\n',
-    sourceGuard], { stdio: ['pipe', 'pipe', 'pipe'] });
-  const holderExited = once(holder, 'exit');
-  holder.stderr.resume();
+test('allocated bytes of a private source clone can prevent baseline retention', { timeout: 30000 }, async () => {
+  const fixture = setup('test -f data/tiny-127 && echo tests 1');
   try {
-    const [ready] = await Promise.race([once(holder.stdout, 'data'),
-      holderExited.then(() => { throw new Error('source lock holder exited before readiness'); })]);
-    assert.equal(String(ready).trim(), 'held');
-    const machine = testMachine();
-    const run = await runProfile({ ...fixture.request, machine: { ...machine,
-      limits: { ...machine.limits, uploadTimeoutMinutes: 0.2 } } });
+    for (let index = 0; index < 128; index++) writeFileSync(join(fixture.source, 'data', `tiny-${index}`), 'x');
+    setReceiverCacheLimit(fixture, 64);
+    const run = await runProfile(fixture.request);
     assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
+    assert.match(readFileSync(join(run.receiptPath, '..', 'rsync.log'), 'utf8'), /source cache full; using disposable job source/);
+    assert.equal(existsSync(fixture.tree), false);
+    assert.equal(existsSync(join(fixture.env.remoteRoot, 'jobs', run.receipt.jobId, 'source-baseline.noindex')), false);
     assert.equal(run.receipt.remote.lockReleased, true);
-    assert.equal(run.receipt.remote.processesRemaining, false);
-    assert.equal(readFileSync(join(fixture.tree, 'peer.txt'), 'utf8'), 'peer source stays unchanged');
-    assert.deepEqual(readdirSync(fixture.tree), ['peer.txt']);
-    assert.match(readFileSync(join(run.receiptPath, '..', 'rsync.log'), 'utf8'), /source cache busy; using disposable job source/);
-    assert.equal(holder.exitCode, null, 'the other source owner must remain alive');
+  } finally { fixture.env.cleanup(); }
+});
 
-    fixture.transport.extraArguments.push('--bwlimit=128');
-    writeFileSync(join(fixture.source, 'large.dat'), randomBytes(2 * 1024 * 1024));
-    const pending = runProfile(fixture.request);
-    const jobs = join(fixture.env.remoteRoot, 'jobs');
-    assert.equal(await waitUntil(() => readdirSync(jobs).some((job) => existsSync(join(jobs, job, 'source-rsync.dirty'))), 10000), true);
-    fixture.interrupts.trigger();
-    const cancelled = await pending;
-    assert.equal(cancelled.receipt.outcome, 'cancelled', JSON.stringify(cancelled.receipt));
-    assert.equal(cancelled.receipt.remote.lockReleased, true);
-    assert.equal(cancelled.receipt.remote.processesRemaining, false);
-    assert.equal(cancelled.receipt.timing.remoteStartedAt, null);
-    assert.equal(readFileSync(join(fixture.tree, 'peer.txt'), 'utf8'), 'peer source stays unchanged');
-    assert.equal(holder.exitCode, null);
-  } finally {
-    holder.stdin.end();
-    await holderExited;
-    fixture.env.cleanup();
-  }
+test('different worktrees reuse only their own verified source baselines', { timeout: 30000 }, async () => {
+  const fixture = setup('echo tests 1', { cache: { name: 'shared-fixture', maxGiB: 0.1, concurrent: true } });
+  const other = join(fixture.env.root, 'other-source');
+  writeFiles(other, { 'run.sh': 'test "$(cat data/file.txt)" = other; echo tests 1', 'data/file.txt': 'other' });
+  writeFileSync(join(fixture.source, 'large.dat'), randomBytes(256 * 1024));
+  writeFileSync(join(other, 'large.dat'), randomBytes(256 * 1024));
+  const legacy = join(fixture.env.remoteRoot, 'cache/shared-fixture/.fleet-runner-sources/rsync-fixture');
+  writeFiles(legacy, { '.fleet-source': 'rsync-fixture', 'tree/legacy.txt': 'previous format' });
+  try {
+    const first = await runProfile(fixture.request);
+    const second = await runProfile({ ...fixture.request, sourceRoot: other });
+    assert.equal(first.receipt.outcome, 'passed', JSON.stringify(first.receipt));
+    assert.equal(second.receipt.outcome, 'passed', JSON.stringify(second.receipt));
+    assert.equal(readFileSync(join(fixture.tree, 'data/file.txt'), 'utf8'), 'first');
+    assert.equal(readFileSync(join(baselineOwner(fixture.env.remoteRoot, other), 'tree/data/file.txt'), 'utf8'), 'other');
+    assert.equal(readFileSync(join(legacy, 'tree/legacy.txt'), 'utf8'), 'previous format');
+    const warm = await runProfile(fixture.request);
+    assert.equal(warm.receipt.outcome, 'passed', JSON.stringify(warm.receipt));
+    assert.ok((warm.receipt.source.transfer?.sentBytes ?? Infinity) < (first.receipt.source.transfer?.sentBytes ?? 0) / 2);
+  } finally { fixture.env.cleanup(); }
 });
 
 test('rsync cold and warm runs isolate execution and never retain job env', { timeout: 30000 }, async () => {
@@ -175,7 +187,7 @@ test('rsync cold and warm runs isolate execution and never retain job env', { ti
     assert.equal(statSync(join(fixture.tree, 'run.sh')).mode & 0o777, 0o751);
     assert.equal(existsSync(join(fixture.tree, '.env')), false);
     assert.equal(existsSync(join(fixture.tree, 'report.txt')), false);
-    assert.deepEqual(readdirSync(fixture.owner).sort(), ['.fleet-source', 'tree']);
+    assert.deepEqual(readdirSync(fixture.owner), ['tree']);
     assert.equal(existsSync(join(cold.receiptPath, '..', 'source.noindex')), false);
     const warm = await runProfile(fixture.request);
     assert.equal(warm.receipt.outcome, 'passed', JSON.stringify(warm.receipt));
@@ -216,13 +228,18 @@ test('overlapping uploads have separate disposable controller copies', { timeout
   const machine = testMachine();
   fixture.request.machine = { ...machine, limits: { ...machine.limits, maxConcurrentJobs: 2 } };
   try {
+    writeFileSync(join(fixture.source, 'large.dat'), randomBytes(256 * 1024));
+    const cold = await runProfile(fixture.request);
+    assert.equal(cold.receipt.outcome, 'passed', JSON.stringify(cold.receipt));
     const runs = await Promise.all([runProfile(fixture.request), runProfile(fixture.request)]);
     for (const run of runs) {
       assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
       assert.equal(run.receipt.remote.lockReleased, true);
       assert.equal(run.receipt.remote.processesRemaining, false);
+      assert.match(readFileSync(join(run.receiptPath, '..', 'rsync.log'), 'utf8'), /seeded private source/);
+      assert.ok((run.receipt.source.transfer?.sentBytes ?? Infinity) < (cold.receipt.source.transfer?.sentBytes ?? 0) / 2);
     }
-    assert.equal(new Set(fixture.transport.sourceDirectories).size, 2);
+    assert.equal(new Set(fixture.transport.sourceDirectories).size, 3);
     assert.deepEqual(readdirSync(sourceStageRoot(fixture.env.paths)), []);
   } finally { fixture.env.cleanup(); }
 });
@@ -322,7 +339,8 @@ test('cancellation during a rate-limited rsync stops receiver before cleanup', {
   writeFileSync(join(fixture.source, 'large.dat'), randomBytes(2 * 1024 * 1024));
   try {
     const pending = runProfile(fixture.request);
-    assert.equal(await waitUntil(() => existsSync(join(fixture.owner, 'dirty')), 10000), true);
+    const jobs = join(fixture.env.remoteRoot, 'jobs');
+    assert.equal(await waitUntil(() => existsSync(jobs) && readdirSync(jobs).some((job) => existsSync(join(jobs, job, 'source-rsync.dirty'))), 10000), true);
     fixture.interrupts.trigger();
     const run = await pending;
     assert.equal(run.receipt.outcome, 'cancelled', JSON.stringify(run.receipt));
@@ -334,20 +352,20 @@ test('cancellation during a rate-limited rsync stops receiver before cleanup', {
     fixture.transport.extraArguments.length = 0;
     const retry = await runProfile(fixture.request);
     assert.equal(retry.receipt.outcome, 'passed', JSON.stringify(retry.receipt));
-    assert.equal(existsSync(join(fixture.owner, 'dirty')), false);
+    assert.equal(existsSync(join(fixture.tree, 'large.dat')), true);
   } finally { fixture.env.cleanup(); }
 });
 
 test('nearly-full source cache uses disposable source and preserves unrelated dependencies', { timeout: 30000 }, async () => {
   const fixture = setup();
   const cache = join(fixture.env.remoteRoot, 'cache/shared-fixture');
-  mkdirSync(cache, { recursive: true });
-  writeFileSync(join(cache, 'dependency'), '');
-  const dependencyBytes = Math.floor(0.1 * 1024 ** 3) - 1024;
-  truncateSync(join(cache, 'dependency'), dependencyBytes);
-  writeFiles(join(cache, '.fleet-runner-sources/other-project'), { '.fleet-source': 'other-project', 'tree/other': 'other-data' });
-  writeFileSync(join(fixture.source, 'data/larger.dat'), Buffer.alloc(8192, 42));
   try {
+    mkdirSync(fixture.owner, { recursive: true });
+    const dependencyBytes = 32 * 1024;
+    writeFileSync(join(cache, 'dependency'), Buffer.alloc(dependencyBytes, 42));
+    writeFiles(join(cache, '.fleet-runner-sources/other-project'), { '.fleet-source': 'other-project', 'tree/other': 'other-data' });
+    writeFileSync(join(fixture.source, 'data/larger.dat'), Buffer.alloc(8192, 42));
+    setReceiverCacheLimit(fixture, allocatedKiB(cache));
     const run = await runProfile(fixture.request);
     assert.equal(run.receipt.outcome, 'passed', JSON.stringify(run.receipt));
     assert.equal(run.receipt.remote.lockReleased, true);
@@ -362,12 +380,12 @@ test('nearly-full source cache uses disposable source and preserves unrelated de
 test('an already-over-limit shared cache refuses without deleting unrelated data', { timeout: 30_000 }, async () => {
   const fixture = setup();
   const cache = join(fixture.env.remoteRoot, 'cache/shared-fixture');
-  mkdirSync(cache, { recursive: true });
   const dependency = join(cache, 'dependency');
-  writeFileSync(dependency, '');
-  const bytes = Math.floor(0.1 * 1024 ** 3) + 8192;
-  truncateSync(dependency, bytes);
   try {
+    mkdirSync(cache, { recursive: true });
+    const bytes = 32 * 1024;
+    writeFileSync(dependency, Buffer.alloc(bytes, 42));
+    setReceiverCacheLimit(fixture, allocatedKiB(cache) - 1);
     const run = await runProfile(fixture.request);
     assert.notEqual(run.receipt.outcome, 'passed');
     assert.equal(run.receipt.timing.remoteStartedAt, null);
