@@ -1,4 +1,4 @@
-# Only trusted main builds reach the private signing Mac.
+# Trusted main releases use a disposable GitHub-hosted Mac. — GPT-6.1 Sol
 name: Publish signed app
 on:
   push:
@@ -15,13 +15,14 @@ jobs:
     uses: ./.github/workflows/check.yml
   release:
     needs: build
-    runs-on: [self-hosted, macOS, ARM64, the-fleet-release]
+    runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: write
     env:
       CODE_SIGN_IDENTITY: 'Developer ID Application: Ethan Sarif-Kattan (T34G959ZG8)'
-      NOTARY_PROFILE: ${{ vars.NOTARY_PROFILE || 'AgentFlowRelease' }}
+      GH_TOKEN: ${{ github.token }}
+      SPARKLE_ACCOUNT: org.the-fleet.app
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
@@ -35,9 +36,22 @@ jobs:
           echo '1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27  '"$RUNNER_TEMP/Sparkle.tar.xz" | shasum -a 256 -c -
           mkdir -p "$RUNNER_TEMP/Sparkle.noindex"
           tar -xf "$RUNNER_TEMP/Sparkle.tar.xz" -C "$RUNNER_TEMP/Sparkle.noindex"
-          tools="$HOME/.local/share/sparkle-tools/2.10.1/bin"
-          # Provision this versioned copy during signing-host setup; reject missing or changed tools before any Keychain access.
-          diff -r "$RUNNER_TEMP/Sparkle.noindex/bin" "$tools"
-          echo "SPARKLE_TOOLS=$tools" >> "$GITHUB_ENV"
+          echo "SPARKLE_TOOLS=$RUNNER_TEMP/Sparkle.noindex/bin" >> "$GITHUB_ENV"
+      - name: Prepare temporary signing credentials
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: bash scripts/prepare-hosted-signing.sh
       - name: Sign, notarize and publish the exact CI app
         run: python3 scripts/release-app.py "$RUNNER_TEMP/prebuilt.noindex"
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          rm -f "${RELEASE_CERTIFICATE:-}" "${RELEASE_SPARKLE_KEY:-}"
+          if [[ -n "${RELEASE_KEYCHAIN:-}" && -f "$RELEASE_KEYCHAIN" ]]; then
+            security delete-keychain "$RELEASE_KEYCHAIN"
+          fi

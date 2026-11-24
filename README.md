@@ -669,8 +669,12 @@ released and no ship processes are stopped by migration.
 
 ## Release updates
 
-Bump `package.json` and `package-lock.json` before publishing app changes. On a push to main, GitHub Actions tests the desktop package, builds a universal Mac app and binds its archive hash to the source commit. The private `the-fleet-release` runner verifies that exact artifact, signs it with Developer ID, notarizes and staples it, then signs the Sparkle feed using the Keychain key for `org.the-fleet.app`. It publishes the release only after these checks and verifies the public download. Existing release tags are never replaced.
+Bump `package.json` and `package-lock.json` before publishing app changes. On a push to main, GitHub-hosted runners test the desktop package, build a universal Mac app and bind its archive hash to the source commit. A disposable hosted Mac verifies that exact artifact, signs it with Developer ID, notarizes and staples it, then signs the Sparkle feed using the existing key for `org.the-fleet.app`. It publishes the release only after these checks and verifies the public download. Existing release tags are never replaced.
 
-The signing Mac needs Developer ID, the notarytool profile selected by `NOTARY_PROFILE`, the app's Sparkle Keychain key and GitHub release access. Credentials stay private. This workflow publishes the desktop app; it does not restart, upgrade or replace the shared coordinator. See `.github/workflows/release.yml` and `scripts/release-app.py`.
+This workflow publishes the desktop app; it does not restart, upgrade or replace the shared coordinator. It downloads checksum-verified Sparkle 2.10.1 tools into the job's temporary directory. See `.github/workflows/release.yml` and `scripts/release-app.py`.
 
-The signing host also needs the shared Sparkle 2.10.1 tools at `~/.local/share/sparkle-tools/2.10.1/bin`. During host setup, copy `bin` from the checksum-verified archive pinned in `.github/workflows/release.yml` to that location, preserving its executable permissions and signatures. Every release still verifies a fresh archive and compares all tool bytes before using this persistent copy. Apps keep separate Keychain accounts and public-key checks; this reuses a tool location, not private keys or permissions. Provision a new version separately when upgrading Sparkle; changed tool identities may require fresh macOS consent.
+## Release credentials
+
+The release workflow signs on a disposable GitHub-hosted Mac. Its repository Actions secrets are APPLE_CERTIFICATE_P12_BASE64, APPLE_CERTIFICATE_PASSWORD, APPLE_ID, APPLE_TEAM_ID, APPLE_APP_SPECIFIC_PASSWORD and SPARKLE_ED25519_PRIVATE_KEY. The certificate export must include its private key, and the Sparkle key must match the public key already embedded in the app.
+
+The job imports credentials into a temporary Keychain, verifies the selected build receipt, signs and notarizes the app, publishes with its scoped GitHub token, and verifies the public bytes. It removes temporary signing material on success or failure. No personal Mac or saved personal GitHub login is required.
