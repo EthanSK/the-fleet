@@ -519,6 +519,43 @@ may wait until the retained output and ownership are resolved.
 
 ## Large temporary output archives
 
+### External working volumes
+
+`remoteRoot` can place the whole worker folder on an external Mac-formatted
+volume. Jobs, build output, reusable dependencies and kernel locks then stay
+together, so source/setup clones do not cross disks. Set its optional
+`rootVolume` through the same revision-checked machine API:
+
+```json
+{
+  "rootVolume": {
+    "mountPoint": "/Volumes/Builds.noindex",
+    "volumeUuid": "00000000-0000-4000-8000-000000000001",
+    "backingVolume": {
+      "mountPoint": "/Volumes/External",
+      "volumeUuid": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  "remoteRoot": "/Volumes/Builds.noindex/FleetRunner.noindex"
+}
+```
+
+Use actual UUIDs. `backingVolume` is optional for a directly formatted drive;
+include it for a sparse disk image so physical free space also limits admission.
+The mounted work volume and backing drive are verified and pinned before the
+normal scripts access the root. A missing or wrong volume refuses access without
+creating a mount point or falling back to the internal disk. Observation does not
+mount an image. Provision its native mounting separately. The internal macOS
+disk still needs the configured reserve for swap and tools with their own paths.
+Status, cancellation and recovery remain available when the volume is full.
+
+Changing the root or its volume identity requires that worker unreserved and
+its old locks free. Preserve pending output and old receipts during migration;
+changing this setting does not migrate or delete the old folder. Other workers
+and existing internal-root configurations keep their current behavior.
+
+### Output-transfer archives
+
 Project `the-fleet.json` files describe jobs. Personal ship locations and devices
 belong only in the private machine registry. A ship can opt into large-archive
 scratch through its `largeScratch` setting, for example:

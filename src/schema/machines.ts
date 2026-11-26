@@ -36,6 +36,14 @@ export interface LargeScratch {
   readonly minFreeGiB: number;
 }
 
+/** Pins externally stored working files to their actual volume. — GPT-6.1 Sol */
+export interface RootVolume {
+  readonly mountPoint: string;
+  readonly volumeUuid: string;
+  /** A sparse image also needs space on its physical backing drive. — GPT-6.1 Sol */
+  readonly backingVolume?: Pick<RootVolume, 'mountPoint' | 'volumeUuid'>;
+}
+
 export interface MachineLimits {
   /** Bounded ordinary-job overlap; live memory/disk/pressure checks still apply. */
   readonly maxConcurrentJobs: number;
@@ -60,6 +68,7 @@ export interface Machine {
   readonly aliases: readonly string[];
   /** Managed root on the machine. Must end in ".noindex"; "~/" is expanded remotely. */
   readonly remoteRoot: string;
+  readonly rootVolume?: RootVolume;
   readonly pathPrepend: readonly string[];
   /** Private machine-specific environment, e.g. an installed tool path on that machine. */
   readonly env: Readonly<Record<string, string>>;
@@ -131,7 +140,7 @@ export function machineNames(machine: Machine): string[] {
 }
 
 function parseMachine(reader: Reader, value: unknown): Machine {
-  const machine = reader.object(value, ['id', 'description', 'transport', 'aliases', 'remoteRoot', 'pathPrepend', 'env', 'limits', 'largeScratch']);
+  const machine = reader.object(value, ['id', 'description', 'transport', 'aliases', 'remoteRoot', 'rootVolume', 'pathPrepend', 'env', 'limits', 'largeScratch']);
   const id = reader.child('id').string(machine['id'], { pattern: IDENTIFIER_PATTERN, patternHint: IDENTIFIER_HINT });
   const description = reader.child('description').optionalString(machine['description']);
 
@@ -149,6 +158,8 @@ function parseMachine(reader: Reader, value: unknown): Machine {
   });
   if (remoteRoot.split('/').some((segment) => segment === '..' || segment === '.')) reader.child('remoteRoot').fail('must not contain "." or ".." segments');
   if (remoteRoot === '~/.noindex' || remoteRoot === '/.noindex') reader.child('remoteRoot').fail('needs a dedicated folder name');
+  const rootVolume = machine['rootVolume'] === undefined ? undefined : parseRootVolume(reader.child('rootVolume'), machine['rootVolume']);
+  if (rootVolume !== undefined && !remoteRoot.startsWith(`${rootVolume.mountPoint}/`)) reader.child('remoteRoot').fail('must stay below the mount and include a .noindex directory');
 
   const pathPrepend = reader.child('pathPrepend').optionalStringArray(machine['pathPrepend'], {
     pattern: /^(\/|~\/)[^:\n]*$/,
@@ -164,6 +175,7 @@ function parseMachine(reader: Reader, value: unknown): Machine {
     transport: { kind: 'agent-bridge', target, ...(configPath === undefined ? {} : { configPath }) },
     aliases,
     remoteRoot,
+    ...(rootVolume === undefined ? {} : { rootVolume }),
     pathPrepend,
     env,
     ...(machine['largeScratch'] === undefined ? {} : { largeScratch: parseLargeScratch(reader.child('largeScratch'), machine['largeScratch']) }),
@@ -174,15 +186,30 @@ function parseMachine(reader: Reader, value: unknown): Machine {
 
 export function parseLargeScratch(reader: Reader, value: unknown): LargeScratch {
   const input = reader.object(value, ['mountPoint', 'volumeUuid', 'directory', 'minFileMiB', 'minFreeGiB']);
-  const mountPoint = reader.child('mountPoint').string(input['mountPoint'], { pattern: /^\/[^\0\n]+$/, patternHint: 'use an absolute mounted-volume path' });
-  if (mountPoint.endsWith('/') || mountPoint.split('/').some((part) => part === '.' || part === '..')) reader.child('mountPoint').fail('must name the mount directly, without a trailing slash or dot segments');
-  const volumeUuid = reader.child('volumeUuid').string(input['volumeUuid'], { pattern: /^[A-Za-z0-9-]{4,128}$/, patternHint: 'use the volume UUID, not its display name' });
+  const { mountPoint, volumeUuid } = volumeIdentity(reader, input);
   const directory = reader.child('directory').string(input['directory'], { pattern: /^[^/\0\n][^\0\n]*$/, patternHint: 'use a dedicated relative scratch directory' });
   const parts = directory.split('/');
   if (parts.some((part) => !part || part === '.' || part === '..') || !parts.some((part) => part.endsWith('.noindex'))) reader.child('directory').fail('must stay below the mount and include a .noindex directory');
   return { mountPoint, volumeUuid, directory,
     minFileMiB: reader.child('minFileMiB').optionalNumber(input['minFileMiB'], { min: 1, max: 8192 }) ?? 64,
     minFreeGiB: reader.child('minFreeGiB').optionalNumber(input['minFreeGiB'], { min: 0, max: 1048576 }) ?? 8 };
+}
+
+/** Uses the existing mount-identity contract for a worker's whole working volume. — GPT-6.1 Sol */
+export function parseRootVolume(reader: Reader, value: unknown): RootVolume {
+  const input = reader.object(value, ['mountPoint', 'volumeUuid', 'backingVolume']);
+  const identity = volumeIdentity(reader, input);
+  if (input['backingVolume'] === undefined) return identity;
+  const backing = reader.child('backingVolume');
+  return { ...identity, backingVolume: volumeIdentity(backing, backing.object(input['backingVolume'], ['mountPoint', 'volumeUuid'])) };
+}
+
+/** Extraction of existing parseLargeScratch identity validation, shared with work volumes. — GPT-6.1 Sol */
+function volumeIdentity(reader: Reader, input: Record<string, unknown>): Pick<RootVolume, 'mountPoint' | 'volumeUuid'> {
+  const mountPoint = reader.child('mountPoint').string(input['mountPoint'], { pattern: /^\/[^\0\n]+$/, patternHint: 'use an absolute mounted-volume path' });
+  if (mountPoint.endsWith('/') || mountPoint.split('/').some((part) => part === '.' || part === '..')) reader.child('mountPoint').fail('must name the mount directly, without a trailing slash or dot segments');
+  const volumeUuid = reader.child('volumeUuid').string(input['volumeUuid'], { pattern: /^[A-Za-z0-9-]{4,128}$/, patternHint: 'use the volume UUID, not its display name' });
+  return { mountPoint, volumeUuid };
 }
 
 function parseLimits(reader: Reader, value: unknown): MachineLimits {

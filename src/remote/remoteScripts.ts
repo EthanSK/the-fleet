@@ -23,7 +23,7 @@ function loadScript(name: 'supervisor.sh' | 'preflight.sh' | 'control.sh'): stri
 
 function guardedCommand(machine: Machine, mode: 'supervisor' | 'shared' | 'clear', script: string, name: string, args: string[]): string {
   const guard = readFileSync(fileURLToPath(new URL('guard.py', REMOTE_DIRECTORY)), 'utf8');
-  return ['python3', '-c', shellQuote(guard), remotePathWord(machine.remoteRoot), shellQuote(mode), shellQuote(script), shellQuote(name), ...args].join(' ');
+  return onRootVolume(machine, ['python3', '-c', shellQuote(guard), remotePathWord(machine.remoteRoot), shellQuote(mode), shellQuote(script), shellQuote(name), ...args].join(' '), mode === 'clear' ? 'access' : 'start');
 }
 
 export interface SupervisorArguments {
@@ -51,13 +51,13 @@ export function supervisorCommand(machine: Machine, args: SupervisorArguments): 
 }
 
 export function preflightCommand(machine: Machine, extraPathPrepend: readonly string[], tools: readonly string[], recoveryJobs: readonly string[] = []): string {
-  return inlineBashCommand(loadScript('preflight.sh'), 'fleet-runner-preflight', [
+  return onRootVolume(machine, inlineBashCommand(loadScript('preflight.sh'), 'fleet-runner-preflight', [
     remotePathWord(machine.remoteRoot),
     shellQuote([...extraPathPrepend, ...machine.pathPrepend].join(':')),
     shellQuote(tools.join(',')),
     shellQuote(machine.limits.heavyProcessNames.join(',')),
     shellQuote(recoveryJobs.join(',')),
-  ]);
+  ]), 'observe');
 }
 
 export type ControlAction = 'status' | 'cancel' | 'clear-stale' | 'reap-stale';
@@ -71,7 +71,7 @@ export function controlCommand(machine: Machine, action: ControlAction, expected
   ];
   return action === 'clear-stale' || action === 'reap-stale'
     ? guardedCommand(machine, 'clear', loadScript('control.sh'), 'fleet-runner-control', args)
-    : inlineBashCommand(loadScript('control.sh'), 'fleet-runner-control', args);
+    : onRootVolume(machine, inlineBashCommand(loadScript('control.sh'), 'fleet-runner-control', args), action === 'status' ? 'observe' : 'access');
 }
 
 /**
@@ -93,5 +93,14 @@ export function rsyncReceiverCommand(jobDirectory: string): string {
 
 export function recoveryCommand(machine: Machine, jobId: string): string {
   const script = readFileSync(fileURLToPath(new URL('recover.py', REMOTE_DIRECTORY)), 'utf8');
-  return ['python3', '-c', shellQuote(script), remotePathWord(machine.remoteRoot), shellQuote(jobId)].join(' ');
+  return onRootVolume(machine, ['python3', '-c', shellQuote(script), remotePathWord(machine.remoteRoot), shellQuote(jobId)].join(' '), 'access');
+}
+
+/** Reuses archive volume identity checks before any external work-root access. — GPT-6.1 Sol */
+function onRootVolume(machine: Machine, command: string, mode: 'observe' | 'access' | 'start'): string {
+  if (machine.rootVolume === undefined) return command;
+  const wrapper = readFileSync(new URL('../../remote/root_volume.py', import.meta.url), 'utf8');
+  const owner = readFileSync(new URL('../../remote/large_scratch.py', import.meta.url), 'utf8');
+  const settings = { ...machine.rootVolume, minFreeGiB: machine.limits.minFreeDiskGiB };
+  return ['python3', '-c', shellQuote(wrapper), remotePathWord(machine.remoteRoot), shellQuote(mode), shellQuote(JSON.stringify(settings)), shellQuote(owner), shellQuote(command)].join(' ');
 }

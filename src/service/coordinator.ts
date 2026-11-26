@@ -46,7 +46,7 @@ export interface Reservation {
 }
 export type PublicReservation = Omit<Reservation, 'tokenHash'> & { readonly forwarding?: PublicForwarding };
 /** Paired route and worker paths for an external reservation owner. */
-export type ReservationConnection = AgentBridgeRoute & Pick<Machine, 'remoteRoot' | 'pathPrepend'> & { readonly dockerContext?: string };
+export type ReservationConnection = AgentBridgeRoute & Pick<Machine, 'remoteRoot' | 'rootVolume' | 'pathPrepend'> & { readonly dockerContext?: string };
 export interface CoordinatorDependencies {
   readonly machines: () => readonly Machine[];
   readonly preferredMachine?: () => string | undefined;
@@ -450,7 +450,7 @@ export class Coordinator {
   /** Supplies worker paths and the Docker context used for externally managed containers. */
   private connection(machine: Machine, route: AgentBridgeRoute): ReservationConnection {
     const dockerContext = machine.env['DOCKER_CONTEXT'];
-    return { ...route, remoteRoot: machine.remoteRoot, pathPrepend: machine.pathPrepend,
+    return { ...route, remoteRoot: machine.remoteRoot, ...(machine.rootVolume === undefined ? {} : { rootVolume: machine.rootVolume }), pathPrepend: machine.pathPrepend,
       ...(dockerContext === undefined ? {} : { dockerContext }) }; // Other worker settings can contain credentials and remain private.
   }
 
@@ -549,6 +549,7 @@ export class Coordinator {
     try {
       const current = this.dependencies.machines().find((candidate) => candidate.id === machine.id);
       return current !== undefined && current.remoteRoot === machine.remoteRoot
+        && JSON.stringify(current.rootVolume) === JSON.stringify(machine.rootVolume)
         && JSON.stringify(current.largeScratch) === JSON.stringify(machine.largeScratch)
         && current.limits.maxConcurrentJobs === machine.limits.maxConcurrentJobs
         && e2eLimit(current) === e2eLimit(machine)

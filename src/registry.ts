@@ -115,6 +115,7 @@ export function serializeMachines(registry: MachinesRegistry): Record<string, un
       transport: machine.transport,
       ...(machine.aliases.length === 0 ? {} : { aliases: machine.aliases }),
       remoteRoot: machine.remoteRoot,
+      ...(machine.rootVolume === undefined ? {} : { rootVolume: machine.rootVolume }),
       ...(machine.pathPrepend.length === 0 ? {} : { pathPrepend: machine.pathPrepend }),
       ...(Object.keys(machine.env).length === 0 ? {} : { env: machine.env }),
       ...(machine.largeScratch === undefined ? {} : { largeScratch: machine.largeScratch }),

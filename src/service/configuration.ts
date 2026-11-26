@@ -14,7 +14,7 @@ import { DEFAULT_REMOTE_ROOT } from '../cli/machineCommands.ts';
 import { usageError } from '../errors.ts';
 import { currentRunsDirectory, type StatePaths } from '../paths.ts';
 import { listRegistrations, loadMachines, loadProject, saveMachines, serializeMachines } from '../registry.ts';
-import { DEFAULT_LIMITS, findMachine, parseLargeScratch, parseMachines, type Machine, type MachineLimits, type MachinesRegistry } from '../schema/machines.ts';
+import { DEFAULT_LIMITS, findMachine, parseLargeScratch, parseRootVolume, parseMachines, type Machine, type MachineLimits, type MachinesRegistry } from '../schema/machines.ts';
 import { ENV_NAME_PATTERN, IDENTIFIER_HINT, IDENTIFIER_PATTERN, Reader } from '../schema/validate.ts';
 import { listAgentBridgePairings, type AgentBridgeRoute } from '../transport/agentBridgeConfig.ts';
 import { ApiError, notFound } from './apiError.ts';
@@ -55,6 +55,7 @@ export function publicMachine(machine: Machine, registry: MachinesRegistry): Rec
     ...(machine.transport.configPath === undefined ? {} : { configPath: machine.transport.configPath }),
     aliases: machine.aliases,
     remoteRoot: machine.remoteRoot,
+    rootVolume: machine.rootVolume ?? null,
     pathPrepend: machine.pathPrepend,
     envNames: Object.keys(machine.env).sort(),
     largeScratch: machine.largeScratch ?? null,
@@ -119,7 +120,7 @@ function withDefault(machines: readonly Machine[], defaultMachine: string | unde
 
 export function addMachine(paths: StatePaths, dependencies: ConfigurationDependencies, value: unknown): Record<string, unknown> {
   const reader = new Reader('new worker');
-  const input = reader.object(value, ['revision', 'id', 'target', 'description', 'aliases', 'remoteRoot', 'pathPrepend', 'env', 'limits', 'makeDefault', 'largeScratch']);
+  const input = reader.object(value, ['revision', 'id', 'target', 'description', 'aliases', 'remoteRoot', 'rootVolume', 'pathPrepend', 'env', 'limits', 'makeDefault', 'largeScratch']);
   const revision = reader.child('revision').string(input['revision']);
   const id = reader.child('id').string(input['id'], { pattern: IDENTIFIER_PATTERN, patternHint: IDENTIFIER_HINT });
   const target = reader.child('target').string(input['target']);
@@ -135,6 +136,7 @@ export function addMachine(paths: StatePaths, dependencies: ConfigurationDepende
     transport: { kind: 'agent-bridge', target },
     aliases: input['aliases'] === undefined ? [] : strings(reader.child('aliases'), input['aliases']),
     remoteRoot: input['remoteRoot'] === undefined ? DEFAULT_REMOTE_ROOT : reader.child('remoteRoot').string(input['remoteRoot']),
+    ...(input['rootVolume'] === undefined || input['rootVolume'] === null ? {} : { rootVolume: parseRootVolume(reader.child('rootVolume'), input['rootVolume']) }),
     pathPrepend: input['pathPrepend'] === undefined ? [] : strings(reader.child('pathPrepend'), input['pathPrepend']),
     env,
     ...(input['largeScratch'] === undefined || input['largeScratch'] === null ? {} : { largeScratch: parseLargeScratch(reader.child('largeScratch'), input['largeScratch']) }),
@@ -149,7 +151,7 @@ export function addMachine(paths: StatePaths, dependencies: ConfigurationDepende
 
 export async function editMachine(paths: StatePaths, dependencies: ConfigurationDependencies, id: string, value: unknown): Promise<Record<string, unknown>> {
   const reader = new Reader(`${id} settings`);
-  const input = reader.object(value, ['revision', 'description', 'target', 'aliases', 'remoteRoot', 'pathPrepend', 'env', 'limits', 'isDefault', 'largeScratch']);
+  const input = reader.object(value, ['revision', 'description', 'target', 'aliases', 'remoteRoot', 'rootVolume', 'pathPrepend', 'env', 'limits', 'isDefault', 'largeScratch']);
   const revision = reader.child('revision').string(input['revision']);
   assertRevision(paths, revision);
   const registry = loadMachines(paths);
@@ -180,11 +182,13 @@ export async function editMachine(paths: StatePaths, dependencies: Configuration
   const description = input['description'] === undefined ? current.description : input['description'] === null ? undefined : reader.child('description').string(input['description']);
   const target = input['target'] === undefined ? current.transport.target : reader.child('target').string(input['target']);
   const largeScratch = input['largeScratch'] === undefined ? current.largeScratch : input['largeScratch'] === null ? undefined : parseLargeScratch(reader.child('largeScratch'), input['largeScratch']);
+  const rootVolume = input['rootVolume'] === undefined ? current.rootVolume : input['rootVolume'] === null ? undefined : parseRootVolume(reader.child('rootVolume'), input['rootVolume']);
   const next: Machine = {
     id,
     transport: { ...current.transport, target },
     aliases: input['aliases'] === undefined ? current.aliases : strings(reader.child('aliases'), input['aliases']),
     remoteRoot: input['remoteRoot'] === undefined ? current.remoteRoot : reader.child('remoteRoot').string(input['remoteRoot']),
+    ...(rootVolume === undefined ? {} : { rootVolume }),
     pathPrepend: input['pathPrepend'] === undefined ? current.pathPrepend : strings(reader.child('pathPrepend'), input['pathPrepend']),
     env,
     ...(largeScratch === undefined ? {} : { largeScratch }),
@@ -197,7 +201,7 @@ export async function editMachine(paths: StatePaths, dependencies: Configuration
   const proposed = validated(withDefault(registry.machines.map((machine) => (machine.id === id ? next : machine)), defaultMachine));
 
   const routeChanged = target !== current.transport.target;
-  const rootChanged = next.remoteRoot !== current.remoteRoot;
+  const rootChanged = next.remoteRoot !== current.remoteRoot || JSON.stringify(next.rootVolume) !== JSON.stringify(current.rootVolume);
   if (JSON.stringify(next.largeScratch) !== JSON.stringify(current.largeScratch)) dependencies.coordinator.assertUnreserved(current, 'Change its large scratch destination');
   // Increasing capacity preserves every admitted job and its captured settings.
   if (next.limits.maxConcurrentJobs < current.limits.maxConcurrentJobs
@@ -254,15 +258,18 @@ function observationView(observation: WorkerObservation): Record<string, unknown
 /** Read-only connection check of a paired computer before it is added or re-pointed. */
 export async function checkPairing(paths: StatePaths, dependencies: ConfigurationDependencies, value: unknown): Promise<Record<string, unknown>> {
   const reader = new Reader('worker check');
-  const input = reader.object(value, ['target', 'remoteRoot', 'id']);
+  const input = reader.object(value, ['target', 'remoteRoot', 'rootVolume', 'id']);
   const target = reader.child('target').string(input['target']);
   const id = input['id'] === undefined ? 'candidate' : reader.child('id').string(input['id'], { pattern: IDENTIFIER_PATTERN, patternHint: IDENTIFIER_HINT });
   const remoteRoot = input['remoteRoot'] === undefined ? DEFAULT_REMOTE_ROOT : reader.child('remoteRoot').string(input['remoteRoot']);
   const existing = loadMachines(paths).machines.find((machine) => machine.id === id);
+  const rootVolume = input['rootVolume'] === undefined
+    ? (existing?.remoteRoot === remoteRoot ? existing.rootVolume : undefined)
+    : input['rootVolume'] === null ? undefined : parseRootVolume(reader.child('rootVolume'), input['rootVolume']);
   dependencies.route(target, existing?.transport.configPath);
   const [candidate] = parseMachines({ schemaVersion: 1, machines: [{
     id, transport: { kind: 'agent-bridge', target, ...(existing?.transport.configPath === undefined ? {} : { configPath: existing.transport.configPath }) },
-    remoteRoot, ...(existing ? { pathPrepend: existing.pathPrepend, limits: existing.limits } : {}),
+    remoteRoot, ...(rootVolume === undefined ? {} : { rootVolume }), ...(existing ? { pathPrepend: existing.pathPrepend, limits: existing.limits } : {}),
   }] }, 'worker check').machines;
   if (!candidate) throw usageError('Invalid worker check.');
   const result = await dependencies.coordinator.probe(candidate);

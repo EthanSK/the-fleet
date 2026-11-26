@@ -296,6 +296,13 @@ export function evaluatePreflight(
   if (report.diskFreeBytes !== undefined && report.diskFreeBytes < limits.minFreeDiskGiB * GIB) {
     refusals.push({ kind: 'disk', message: `Not enough free disk on ${machine.id}: ${formatGiB(report.diskFreeBytes)} free, ${limits.minFreeDiskGiB} GiB required` });
   }
+  // Moving jobs to USB must not remove the existing internal-disk protection:
+  // macOS swap and tools with their own cache paths still use that volume.
+  // Found by Claude Opus 5.5. Fixed by GPT-6.1 Sol.
+  if (machine.rootVolume !== undefined && report.os === 'Darwin') {
+    if (report.swapDiskFreeBytes === undefined) refusals.push({ kind: 'incomplete', message: `Machine check on ${machine.id} didn't finish.` });
+    else if (report.swapDiskFreeBytes < limits.minFreeDiskGiB * GIB) refusals.push({ kind: 'disk', message: `Not enough free disk on ${machine.id}: ${formatGiB(report.swapDiskFreeBytes)} free, ${limits.minFreeDiskGiB} GiB required` });
+  }
   const memoryHeadroom = memoryHeadroomBytes(report, machine);
   if (memoryHeadroom !== undefined && memoryHeadroom < limits.minAvailableMemoryGiB * GIB) {
     refusals.push({
