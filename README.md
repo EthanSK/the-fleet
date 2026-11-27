@@ -549,6 +549,13 @@ mount an image. Provision its native mounting separately. The internal macOS
 disk still needs the configured reserve for swap and tools with their own paths.
 Status, cancellation and recovery remain available when the volume is full.
 
+Container VMs have their own host-directory shares. When moving `remoteRoot`,
+update those shares as well, preserving any old paths still in use. Restart a VM
+only after a drain reservation becomes exclusive and its other work has finished.
+Before admitting container jobs, verify the new root inside the VM and run a real
+bind-mounted container that reads an actual source file and exchanges a fresh
+file with the host. Host filesystem and native-job checks do not prove VM access.
+
 Changing the root or its volume identity requires that worker unreserved and
 its old locks free. Preserve pending output and old receipts during migration;
 changing this setting does not migrate or delete the old folder. Other workers
